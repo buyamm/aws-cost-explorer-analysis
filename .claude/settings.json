@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv sync)",
+      "Bash(uv lock)",
+      "Bash(uv run pytest:*)"
+    ],
+    "ask": [
+      "Bash(uv add:*)",
+      "Bash(uv remove:*)"
+    ],
+    "deny": [
+      "Bash(aws:*)",
+      "Bash(cost-anomaly:*)",
+      "Bash(uv run cost-anomaly:*)",
+      "Bash(uv run python -m cost_anomaly:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(env)",
+      "Bash(printenv:*)",
+      "Read(~/.aws/**)",
+      "Edit(~/.aws/**)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./*.csv)"
+    ]
+  }
+}
