@@ -123,7 +123,7 @@ def build_params(s: Settings) -> list[Param]:
         Param("new_threshold", "--new-threshold", usd(s.new_threshold) + "/ngày", "Chi phí/ngày tối thiểu để báo NEW_SERVICE cho service chưa đủ lịch sử."),
         Param("min_history", "--min-history", f"{s.min_history} ngày", "Số ngày có chi phí > 0 tối thiểu trong baseline để dùng z-score. Ít hơn thì service được coi là mới hoặc phát sinh thưa."),
         Param("baseline_days", None, f"{s.baseline_days} ngày", "Số ngày ngay trước mỗi ngày đánh giá được dùng làm mức chuẩn."),
-        Param("eval_days", None, f"{s.eval_days} ngày", "Số ngày được kiểm tra bất thường trong mỗi lần chạy."),
+        Param("eval_days", "--eval-days", f"{s.eval_days} ngày", "Số ngày được kiểm tra bất thường trong mỗi lần chạy (1–58, để mọi ngày đánh giá đều đủ 30 ngày baseline)."),
         Param("exclude_recent_days", None, f"{s.exclude_recent_days} ngày", "Bỏ qua các ngày gần nhất vì Cost Explorer chưa chốt số liệu (Estimated), dễ báo sai."),
         Param("lookback_days", None, f"{s.lookback_days} ngày", "Tổng số ngày dữ liệu lấy từ Cost Explorer (phải đủ cho baseline của ngày đánh giá sớm nhất)."),
         Param("max_pages", "--max-pages", str(s.max_pages), "Giới hạn số request GetCostAndUsage (mỗi request $0.01)."),

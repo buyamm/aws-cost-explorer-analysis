@@ -129,7 +129,7 @@ Report → anomalies_report.html, anomalies_report.md
 
 Mở `anomalies_report.html` bằng trình duyệt. Nên đọc theo thứ tự:
 
-1. **Nhận định chính**: tổng chi phí 7 ngày đánh giá, phần vượt mức bình thường, service đóng góp nhiều nhất. Phần này cũng cho biết mỗi bất thường là sự kiện một ngày, kéo dài nhiều ngày, hay vẫn còn ở ngày mới nhất.
+1. **Nhận định chính**: tổng chi phí các ngày đánh giá (mặc định 7, đổi bằng `--eval-days`), phần vượt mức bình thường, service đóng góp nhiều nhất. Phần này cũng cho biết mỗi bất thường là sự kiện một ngày, kéo dài nhiều ngày, hay vẫn còn ở ngày mới nhất.
 2. **Bước tiếp theo**: việc cần kiểm tra tương ứng với từng loại bất thường.
 3. **Biểu đồ** chi phí 90 ngày của từng service bất thường, có median, vùng bình thường và các điểm bị báo. Rê chuột (hoặc focus rồi dùng ←/→) để xem số liệu từng ngày.
 4. **Bảng bất thường**: mỗi dòng kèm giải thích các con số.
