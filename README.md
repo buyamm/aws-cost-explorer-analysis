@@ -148,6 +148,9 @@ cost-anomaly --profile project-cost --end-date 2026-09-30
 # Nhạy hơn: z > 3 và chỉ cần tăng $5 là báo
 cost-anomaly --profile project-cost --k 3 --min-delta 5
 
+# Đánh giá 30 ngày thay vì 7 (vẫn chỉ tốn 1–2 request vì dữ liệu lấy về vẫn là 90 ngày)
+cost-anomaly --profile project-cost --eval-days 30
+
 # Chỉ ghi CSV
 cost-anomaly --profile project-cost --no-report
 ```
@@ -164,6 +167,7 @@ Thư mục trong `--output` phải tồn tại trước khi chạy.
 | `--min-delta` | `10` | Số USD tối thiểu vượt median thì SPIKE mới được báo |
 | `--new-threshold` | `10` | USD/ngày tối thiểu để báo NEW_SERVICE |
 | `--min-history` | `7` | Số ngày có chi phí > 0 trong baseline cần để dùng z-score. Ít hơn thì service được coi là service mới |
+| `--eval-days` | `7` | Số ngày được đánh giá, từ 1 đến 58 (để mọi ngày đánh giá đều có đủ 30 ngày baseline trong 90 ngày dữ liệu) |
 | `--max-pages` | `20` | Số request Cost Explorer tối đa (mỗi request $0.01) |
 | `--end-date` | hôm nay (UTC) | Ngày kết thúc khung lấy dữ liệu, dạng `YYYY-MM-DD`, không tính vào khung |
 | `--no-report` | | Không ghi report HTML/Markdown |
@@ -176,7 +180,7 @@ Với `--end-date` = T (mặc định là hôm nay):
 
 - Tool lấy dữ liệu các ngày `[T−90, T)`.
 - Bỏ qua 2 ngày gần nhất (T−2, T−1) vì Cost Explorer chưa chốt số liệu.
-- Đánh giá 7 ngày từ T−9 đến T−3. Mỗi ngày được so với 30 ngày ngay trước nó:
+- Đánh giá `--eval-days` ngày (mặc định 7, từ T−9 đến T−3). Mỗi ngày được so với 30 ngày ngay trước nó:
 
 ```text
 median = trung vị chi phí 30 ngày baseline (ngày không có chi phí tính là $0)

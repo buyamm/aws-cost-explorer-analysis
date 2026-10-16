@@ -19,6 +19,8 @@ from .report import write_csv
 from .transform import to_matrix
 
 defaults = Settings()
+# Every evaluated day needs a full baseline inside the fetched lookback window.
+MAX_EVAL_DAYS = defaults.lookback_days - defaults.baseline_days - defaults.exclude_recent_days
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -33,6 +35,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--min-delta", type=float, default=defaults.min_delta, help="USD above baseline median")
     p.add_argument("--new-threshold", type=float, default=defaults.new_threshold, help="USD/day for new services")
     p.add_argument("--min-history", type=int, default=defaults.min_history, help="non-zero baseline days for MAD")
+    p.add_argument(
+        "--eval-days",
+        type=int,
+        default=defaults.eval_days,
+        help=f"number of days to evaluate, 1-{MAX_EVAL_DAYS}",
+    )
     p.add_argument("--max-pages", type=int, default=defaults.max_pages, help="cap on Cost Explorer requests")
     p.add_argument(
         "--end-date",
@@ -47,6 +55,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if not args.profile:
         p.error("--profile is required (or set AWS_PROFILE)")
+    if not 1 <= args.eval_days <= MAX_EVAL_DAYS:
+        p.error(f"--eval-days must be between 1 and {MAX_EVAL_DAYS}")
     return args
 
 
@@ -57,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         min_delta=args.min_delta,
         new_threshold=args.new_threshold,
         min_history=args.min_history,
+        eval_days=args.eval_days,
         max_pages=args.max_pages,
     )
     today = args.end_date or datetime.now(timezone.utc).date()

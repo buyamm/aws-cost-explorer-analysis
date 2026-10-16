@@ -99,3 +99,32 @@ def test_profile_falls_back_to_aws_profile_env(monkeypatch):
 def test_profile_required():
     with pytest.raises(SystemExit):
         cli.parse_args([])
+
+
+def test_eval_days_narrows_the_evaluated_window(tmp_path, fake_session, ce_client):
+    out = tmp_path / "anomalies.csv"
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", build_response())
+        code = cli.main(
+            ["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--eval-days", "2", "--no-report"]
+        )
+
+    assert code == 0
+    with open(out, newline="") as f:
+        rows = list(csv.DictReader(f))
+    # Evaluates 2026-10-11..12 only, so the Bedrock day (10-10) drops out.
+    assert [(r["date"], r["service"]) for r in rows] == [("2026-10-12", "Amazon EC2")]
+
+
+def test_eval_days_max_fits_lookback():
+    args = cli.parse_args(["--profile", "p", "--eval-days", str(cli.MAX_EVAL_DAYS)])
+    windows = compute_windows(TODAY, Settings(eval_days=args.eval_days))
+    assert len(windows.eval_days) == cli.MAX_EVAL_DAYS == 58
+
+
+@pytest.mark.parametrize("value", ["0", "59"])
+def test_eval_days_out_of_range_rejected(value, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.parse_args(["--profile", "p", "--eval-days", value])
+    assert exc.value.code == 2
+    assert "--eval-days must be between 1 and 58" in capsys.readouterr().err
