@@ -170,12 +170,22 @@ Thư mục trong `--output` phải tồn tại trước khi chạy.
 | `--eval-days` | `7` | Số ngày **đã chốt** được đánh giá, từ 1 đến 58 (để mọi ngày đánh giá đều có đủ 30 ngày baseline trong 90 ngày dữ liệu) |
 | `--max-pages` | `20` | Số request Cost Explorer tối đa (mỗi request $0.01) |
 | `--config` | | File TOML: ngưỡng mặc định, ngưỡng riêng từng service, danh sách `ignore`/`known`. Xem [File config](#file-config) |
+| `--state` | | File JSON lưu các sự cố đã báo. Xem [Sự cố và cảnh báo Slack](#sự-cố-và-cảnh-báo-slack) |
+| `--fail-on-anomaly` | | Trả mã 1 khi có điều mới cần xem (dùng cho CI/cron) |
+| `--alert-dry-run` | | In nội dung tin nhắn Slack thay vì gửi; không ghi `--state` |
 | `--no-drop` | | Không báo DROP (service rơi về gần 0) |
 | `--no-provisional` | | Không đánh giá 2 ngày gần nhất (chưa chốt số liệu), quay về khung cũ T−9…T−3 |
 | `--end-date` | hôm nay (UTC) | Ngày kết thúc khung lấy dữ liệu, dạng `YYYY-MM-DD`, không tính vào khung |
 | `--no-report` | | Không ghi report HTML/Markdown |
 
-Mã thoát: `0` khi chạy thành công (kể cả khi có bất thường). `2` khi tham số hoặc file config sai, hoặc gặp lỗi xác thực / Cost Explorer; khi đó không ghi file nào. File config sai bị phát hiện trước khi hỏi MFA nên không tốn request nào.
+Mã thoát:
+
+| Mã | Ý nghĩa |
+|---|---|
+| `0` | Chạy thành công (kể cả khi có bất thường, nếu không dùng `--fail-on-anomaly`) |
+| `1` | Có `--fail-on-anomaly` và có sự cố mới/xấu đi (khi có `--state`), hoặc có bất thường ở service không thuộc `known` (khi không có `--state`) |
+| `2` | Tham số, file config, file state hoặc webhook sai, hoặc lỗi xác thực / Cost Explorer; không ghi CSV. Lỗi cục bộ được phát hiện trước khi hỏi MFA nên không tốn request nào |
+| `3` | Gửi Slack thất bại sau 3 lần thử. CSV/report vẫn được ghi, state giữ nguyên để lần chạy sau gửi lại |
 
 ### File config
 
@@ -202,6 +212,32 @@ min_delta = 5
 - Thứ tự ưu tiên: mặc định của tool → `[defaults]` → cờ CLI truyền tường minh → `[services."…"]` của service đó.
 - Giá trị phải là số dương, `min_history` là số nguyên, `drop_ratio` nhỏ hơn 1. Key lạ hoặc sai kiểu thì tool dừng với mã 2.
 - Ví dụ đầy đủ: `demo/cost-anomaly.toml`.
+
+## Sự cố và cảnh báo Slack
+
+Khi chạy hằng ngày, các khung đánh giá chồng lên nhau (7 ngày đã chốt + 2 ngày tạm tính). Vì vậy cùng một spike xuất hiện ở nhiều lần chạy liên tiếp, và service mới bị gắn NEW_SERVICE mỗi ngày trong một tuần. `--state` giải quyết việc này:
+
+- Các ngày bất thường liên tiếp của cùng service và cùng loại được gộp thành một **sự cố** có ngày bắt đầu/kết thúc.
+- Sự cố chỉ được báo khi **mới**, hoặc khi **xấu đi**: đỉnh tăng ít nhất 50% và ít nhất `min_delta` của service so với lần báo trước. DROP so theo độ lớn.
+- Service thuộc `known` được ghi nhận nhưng không bao giờ được báo.
+- Sự cố đã kết thúc trước khung dữ liệu 90 ngày được xóa khỏi file.
+- File state chỉ được ghi sau khi gửi thành công, nên gửi lỗi thì lần sau gửi lại, không mất cảnh báo. File hỏng thì tool dừng với mã 2, không tự xóa (xóa sẽ gửi lại mọi thứ).
+
+### Gửi Slack
+
+1. Trong Slack, tạo app và bật **Incoming Webhooks** cho kênh nhận cảnh báo, rồi copy URL dạng `https://hooks.slack.com/services/...`.
+2. Đặt URL vào biến môi trường (không truyền qua tham số, vì tham số lộ trong `ps` và lịch sử shell):
+
+```sh
+export COST_ANOMALY_SLACK_WEBHOOK='https://hooks.slack.com/services/...'
+cost-anomaly --profile project-cost --state ~/.cost-anomaly/state.json
+```
+
+Mỗi lần chạy có sự cố mới/xấu đi sẽ gửi đúng một tin nhắn tiếng Việt. Tin nhắn liệt kê tối đa 10 sự cố, xếp theo tác động tháng, kèm nhãn tạm tính / do giá/coverage và vị trí report. Tool chỉ chấp nhận URL `https://hooks.slack.com/...` và không bao giờ in URL ra. Có thể dùng `--alert-dry-run` để xem trước nội dung.
+
+Không đặt webhook thì danh sách sự cố mới được in ra màn hình. Kết hợp `--fail-on-anomaly` để CI hoặc cron báo lỗi khi có điều mới.
+
+Lưu ý: chạy tay vẫn cần nhập MFA. Để chạy tự động hằng ngày không cần người, xem phần triển khai Lambda (spec 005).
 
 ## Cách phát hiện
 
@@ -292,7 +328,7 @@ CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ
 
 ## Demo offline
 
-Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính), RDS tăng $7 (chỉ bị báo nhờ ngưỡng riêng trong `demo/cost-anomaly.toml`), AWS Backup ngừng chạy (DROP), Bedrock được đánh dấu `known`. Demo không gọi AWS và không tốn phí.
+Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính), RDS tăng $7 (chỉ bị báo nhờ ngưỡng riêng trong `demo/cost-anomaly.toml`), AWS Backup ngừng chạy (DROP), Bedrock được đánh dấu `known`. Demo chạy hai lần với cùng file state: lần một (hôm qua) ghi nhận sự cố; lần hai (hôm nay, `--alert-dry-run`) chỉ đưa sự cố mới vào tin nhắn Slack. Demo không gọi AWS và không tốn phí.
 
 ```sh
 uv sync
@@ -311,6 +347,6 @@ uv run pytest tests/test_detect.py -q      # một file test
 uv build                                   # tạo dist/*.whl và dist/*.tar.gz để phát hành
 ```
 
-Test không gọi AWS thật. Chúng dùng credential giả, file config tạm, và response giả lập bằng `botocore.stub.Stubber` cùng các fixture JSON.
+Test không gọi AWS hay Slack thật (`urllib.request.urlopen` được thay bằng stub, biến `COST_ANOMALY_SLACK_WEBHOOK` bị xóa trong mọi test). Chúng dùng credential giả, file config tạm, và response giả lập bằng `botocore.stub.Stubber` cùng các fixture JSON.
 
 Luồng xử lý chính: `auth` (AssumeRole + session policy) → `pipeline.run`: `guard` (allowlist API) → `fetch` (phân trang) → `transform` (ma trận service × ngày cho từng metric) → `detect` → `report` (CSV) → `analysis` → `html_report` / `md_report`.

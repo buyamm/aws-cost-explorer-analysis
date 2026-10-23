@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from .config import Settings
-from .dates import Windows, date_range
+from .dates import Windows, date_range, runs_of
 from .detect import AMORTIZED, DROP, MAD_TO_SIGMA, NEW_SERVICE, RATE, SPIKE, Anomaly, Score, score_pair
 from .transform import CostMatrix
 
@@ -226,16 +226,6 @@ def explain(a: Anomaly, s: Score, settings: Settings) -> str:
         f"{measure} {usd(a.cost)}, {ratio_text(a.cost, a.baseline_median)} {usd(a.baseline_median)}, vượt {usd(a.delta)} "
         f"(≥ min_delta {usd(settings.min_delta)}). {scale} → z = {s.robust_z:.2f}, vượt ngưỡng k = {settings.k:g}."
     )
-
-
-def runs_of(days: list[date]) -> list[tuple[date, date]]:
-    runs: list[tuple[date, date]] = []
-    for d in sorted(days):
-        if runs and d - runs[-1][1] == timedelta(days=1):
-            runs[-1] = (runs[-1][0], d)
-        else:
-            runs.append((d, d))
-    return runs
 
 
 def near_miss(s: Score, settings: Settings) -> str | None:

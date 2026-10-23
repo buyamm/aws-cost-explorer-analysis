@@ -262,7 +262,9 @@ SCENARIOS = """\
   • RDS +$7 for a day (config min_delta = 5) → expect SPIKE (Lambda's +$7 stays filtered)
   • AWS Backup $40 → $0 from day 6, ongoing → expect DROP, negative month_impact
   • Bedrock is listed as known               → its rows have known=true
-  (config: demo/cost-anomaly.toml)"""
+  (config: demo/cost-anomaly.toml)
+  Two runs share a --state file: yesterday records the incidents, today only the new/worse
+  ones (the CloudWatch spike of T−1) appear in the Slack payload."""
 
 
 def main() -> int:
@@ -282,11 +284,12 @@ def main() -> int:
     )
 
     windows = compute_windows(args.end_date, Settings())
-    days = date_range(windows.fetch_start, windows.fetch_end)
+    # One extra day at the start so yesterday's run has a full 90-day window too.
+    days = date_range(windows.fetch_start - timedelta(days=1), windows.fetch_end)
     matrix, paid = simulate_costs(days, windows)
 
     header("cost-anomaly — offline demo (no AWS calls)")
-    print(f"  Fetch window : {windows.fetch_start} → {windows.fetch_end} (exclusive), {len(days)} days")
+    print(f"  Fetch window : {windows.fetch_start} → {windows.fetch_end} (exclusive), {len(days) - 1} days")
     print(
         f"  Evaluate     : {windows.eval_days[0]} → {windows.eval_days[-1]} "
         f"(last 2 days provisional: CE still settling)"
@@ -297,19 +300,35 @@ def main() -> int:
     print_matrix_summary(matrix, windows.eval_days)
     print_matrix_summary(paid, windows.eval_days, "Simulated amortized (actually paid) cost (USD)")
 
-    stubs = install_fake_aws(to_results(matrix, paid, days), windows.fetch_start, windows.fetch_end)
-    config = Path(__file__).parent / "cost-anomaly.toml"
-    argv = ["--profile", PROFILE, "--end-date", args.end_date.isoformat(), "--output", str(args.output), "--config", str(config)]
-    header("Running: cost-anomaly " + " ".join(argv))
-    code = cli.main(argv)
-    for s in stubs:
-        s.assert_no_pending_responses()
+    config = str(Path(__file__).parent / "cost-anomaly.toml")
+    state = str(tmp / "state.json")
+    yesterday = args.end_date - timedelta(days=1)
+
+    header(f"Run 1 — yesterday ({yesterday}): record incidents in {state}")
+    code = run_cli(matrix, paid, yesterday, ["--output", str(tmp / "yesterday.csv"), "--no-report", "--config", config, "--state", state])
+    if code != 0:
+        return code
+
+    header(f"Run 2 — today ({args.end_date}): only new or worse incidents reach Slack (dry run)")
+    code = run_cli(matrix, paid, args.end_date, ["--output", str(args.output), "--config", config, "--state", state, "--alert-dry-run"])
     if code != 0:
         return code
 
     print_anomalies(args.output)
     print()
     return 0
+
+
+def run_cli(usage: Matrix, paid: Matrix, end: date, extra: list[str]) -> int:
+    """Run the real CLI for one end date against freshly stubbed AWS."""
+    w = compute_windows(end, Settings())
+    stubs = install_fake_aws(to_results(usage, paid, date_range(w.fetch_start, w.fetch_end)), w.fetch_start, w.fetch_end)
+    argv = ["--profile", PROFILE, "--end-date", end.isoformat(), *extra]
+    print(f"  $ cost-anomaly {' '.join(argv)}")
+    code = cli.main(argv)
+    for s in stubs:
+        s.assert_no_pending_responses()
+    return code
 
 
 if __name__ == "__main__":

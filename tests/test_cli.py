@@ -1,4 +1,8 @@
 import csv
+import io
+import json
+import urllib.error
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -207,3 +211,90 @@ def test_no_drop_flag_disables_drops(tmp_path, fake_session, ce_client):
             assert cli.main(["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--no-report", *extra]) == 0
         with open(out, newline="") as f:
             assert len(list(csv.DictReader(f))) == expected
+
+
+WEBHOOK = "https://hooks.slack.com/services/T0/B0/SECRET"
+
+
+class SlackStub:
+    """Stands in for urllib.request.urlopen: records POSTs, optionally fails."""
+
+    def __init__(self, fail: bool = False):
+        self.posts, self.fail = [], fail
+
+    def __call__(self, request, timeout):
+        self.posts.append(json.loads(request.data))
+        if self.fail:
+            raise urllib.error.HTTPError(request.full_url, 500, "boom", {}, None)
+        return io.BytesIO(b"ok")
+
+
+@pytest.fixture
+def slack(monkeypatch):
+    stub = SlackStub()
+    monkeypatch.setattr(urllib.request, "urlopen", stub)
+    monkeypatch.setattr("cost_anomaly.alert.time.sleep", lambda s: None)
+    monkeypatch.setenv("COST_ANOMALY_SLACK_WEBHOOK", WEBHOOK)
+    return stub
+
+
+def run_alerting(tmp_path, ce_client, *extra):
+    out = tmp_path / "anomalies.csv"
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", build_response())
+        code = cli.main(["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--no-report", *extra])
+    return code, out
+
+
+def test_state_and_webhook_post_once_then_dedup(tmp_path, fake_session, ce_client, slack, capsys):
+    state = tmp_path / "state.json"
+    assert run_alerting(tmp_path, ce_client, "--state", str(state))[0] == 0
+    (payload,) = slack.posts
+    assert "Amazon EC2" in json.dumps(payload) and state.exists()
+    assert run_alerting(tmp_path, ce_client, "--state", str(state))[0] == 0
+    assert len(slack.posts) == 1
+    assert "SECRET" not in capsys.readouterr().out
+
+
+def test_delivery_failure_exits_3_and_keeps_state(tmp_path, fake_session, ce_client, slack, capsys):
+    slack.fail = True
+    state = tmp_path / "state.json"
+    code, out = run_alerting(tmp_path, ce_client, "--state", str(state), "--fail-on-anomaly")
+    assert code == 3 and out.exists() and not state.exists()
+    err = capsys.readouterr().err
+    assert "HTTP 500" in err and "SECRET" not in err
+
+
+def test_bad_webhook_exits_2_before_auth(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("COST_ANOMALY_SLACK_WEBHOOK", "https://evil.example/hook")
+    monkeypatch.setattr(cli, "assume_role_session", lambda p: pytest.fail("must not authenticate"))
+    assert cli.main(["--profile", "p", "--output", str(tmp_path / "a.csv")]) == 2
+    assert "evil" not in capsys.readouterr().err
+
+
+def test_corrupt_state_exits_2_before_auth(tmp_path, monkeypatch):
+    state = tmp_path / "state.json"
+    state.write_text("{oops")
+    monkeypatch.setattr(cli, "assume_role_session", lambda p: pytest.fail("must not authenticate"))
+    assert cli.main(["--profile", "p", "--state", str(state), "--output", str(tmp_path / "a.csv")]) == 2
+
+
+def test_dry_run_prints_payload_without_sending_or_saving(tmp_path, fake_session, ce_client, slack, capsys):
+    state = tmp_path / "state.json"
+    assert run_alerting(tmp_path, ce_client, "--state", str(state), "--alert-dry-run")[0] == 0
+    assert slack.posts == [] and not state.exists()
+    assert '"blocks"' in capsys.readouterr().out
+
+
+def test_fail_on_anomaly_with_state(tmp_path, fake_session, ce_client, monkeypatch):
+    monkeypatch.delenv("COST_ANOMALY_SLACK_WEBHOOK", raising=False)
+    state = tmp_path / "state.json"
+    assert run_alerting(tmp_path, ce_client, "--state", str(state), "--fail-on-anomaly")[0] == 1
+    assert run_alerting(tmp_path, ce_client, "--state", str(state), "--fail-on-anomaly")[0] == 0
+
+
+def test_fail_on_anomaly_without_state_ignores_known(tmp_path, fake_session, ce_client):
+    assert run_alerting(tmp_path, ce_client, "--fail-on-anomaly")[0] == 1
+    cfg = tmp_path / "c.toml"
+    cfg.write_text('known = ["Amazon EC2", "Amazon Bedrock"]\n')
+    assert run_alerting(tmp_path, ce_client, "--fail-on-anomaly", "--config", str(cfg))[0] == 0
