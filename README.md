@@ -169,11 +169,39 @@ Thư mục trong `--output` phải tồn tại trước khi chạy.
 | `--min-history` | `7` | Số ngày có chi phí > 0 trong baseline cần để dùng z-score. Ít hơn thì service được coi là service mới |
 | `--eval-days` | `7` | Số ngày **đã chốt** được đánh giá, từ 1 đến 58 (để mọi ngày đánh giá đều có đủ 30 ngày baseline trong 90 ngày dữ liệu) |
 | `--max-pages` | `20` | Số request Cost Explorer tối đa (mỗi request $0.01) |
+| `--config` | | File TOML: ngưỡng mặc định, ngưỡng riêng từng service, danh sách `ignore`/`known`. Xem [File config](#file-config) |
+| `--no-drop` | | Không báo DROP (service rơi về gần 0) |
 | `--no-provisional` | | Không đánh giá 2 ngày gần nhất (chưa chốt số liệu), quay về khung cũ T−9…T−3 |
 | `--end-date` | hôm nay (UTC) | Ngày kết thúc khung lấy dữ liệu, dạng `YYYY-MM-DD`, không tính vào khung |
 | `--no-report` | | Không ghi report HTML/Markdown |
 
-Mã thoát: `0` khi chạy thành công (kể cả khi có bất thường). `2` khi tham số sai hoặc gặp lỗi xác thực / Cost Explorer; khi đó không ghi file nào.
+Mã thoát: `0` khi chạy thành công (kể cả khi có bất thường). `2` khi tham số hoặc file config sai, hoặc gặp lỗi xác thực / Cost Explorer; khi đó không ghi file nào. File config sai bị phát hiện trước khi hỏi MFA nên không tốn request nào.
+
+### File config
+
+Mỗi service có mức dao động và giá trị tiền khác nhau, nên một ngưỡng chung thường quá nhạy với service này và quá lỏng với service khác. File TOML cho phép chỉnh riêng:
+
+```toml
+# Key cấp cao nhất phải đặt trước bảng [..] đầu tiên
+ignore = ["Tax"]                 # không phân tích
+known = ["Amazon Bedrock"]       # vẫn báo, gắn nhãn "đã biết"
+
+[defaults]                       # ghi đè ngưỡng cho mọi service
+k = 3.5
+min_delta = 10
+
+[services."Amazon Bedrock"]      # tên đúng như dimension SERVICE của Cost Explorer
+min_delta = 50
+new_threshold = 50
+
+[services."Amazon Relational Database Service"]
+min_delta = 5
+```
+
+- Key dùng được trong `[defaults]`: `k`, `min_delta`, `new_threshold`, `min_history`, `drop_ratio`, `drop_min_median`, `driver_tolerance`. Trong `[services."…"]`: như trên, trừ `driver_tolerance`.
+- Thứ tự ưu tiên: mặc định của tool → `[defaults]` → cờ CLI truyền tường minh → `[services."…"]` của service đó.
+- Giá trị phải là số dương, `min_history` là số nguyên, `drop_ratio` nhỏ hơn 1. Key lạ hoặc sai kiểu thì tool dừng với mã 2.
+- Ví dụ đầy đủ: `demo/cost-anomaly.toml`.
 
 ## Cách phát hiện
 
@@ -193,7 +221,12 @@ z      = (cost − median) / σ̂
 
 SPIKE        ⇔ baseline có ≥ min_history ngày có chi phí, z > k và cost − median ≥ min_delta
 NEW_SERVICE  ⇔ baseline có < min_history ngày có chi phí và cost ≥ new_threshold
+DROP         ⇔ đủ lịch sử, median ≥ drop_min_median ($10), cost ≤ drop_ratio (10%) × median và z < −k
 ```
+
+**DROP** báo khi service đang ổn định bỗng gần như không phát sinh chi phí: backup ngừng, pipeline chết, workload production sập. Cả AWS Cost Anomaly Detection lẫn bản trước của tool đều không báo chiều giảm. Điều kiện được xét trên chi phí thực trả và phải khớp với usage, nên việc mua Savings Plans/RI (chi phí giảm một phần) không bị báo nhầm. Tắt bằng `--no-drop`.
+
+**Tác động tháng** (`month_impact`) = `delta × số ngày từ ngày đó tới hết tháng`, tính cả hai đầu. Con số này trả lời câu hỏi "nếu mức này tiếp diễn thì tháng này tốn thêm bao nhiêu"; với DROP thì âm.
 
 Median và MAD ít bị ảnh hưởng bởi các đỉnh cũ: một ngày tăng vọt trong quá khứ không kéo ngưỡng lên. Ngưỡng `min_delta` loại các biến động có z cao nhưng số tiền nhỏ.
 
@@ -221,7 +254,7 @@ Lưu ý: một service mới bị gắn NEW_SERVICE **mỗi ngày** cho tới kh
 |---|---|
 | `date` | Ngày được đánh giá (UTC) |
 | `service` | Tên service theo Cost Explorer |
-| `kind` | `SPIKE` hoặc `NEW_SERVICE` |
+| `kind` | `SPIKE`, `NEW_SERVICE` hoặc `DROP` |
 | `cost` | Chi phí trong ngày (USD), theo số đo ở cột `metric` |
 | `baseline_median` | Median 30 ngày trước, tức mức "bình thường" |
 | `mad` | Median Absolute Deviation của 30 ngày đó |
@@ -230,6 +263,8 @@ Lưu ý: một service mới bị gắn NEW_SERVICE **mỗi ngày** cho tới kh
 | `metric` | `usage` hoặc `amortized`: số liệu ở các cột trên lấy từ số đo nào |
 | `driver` | `usage` (dùng nhiều hơn) hoặc `rate` (do giá/coverage Savings Plans, RI) |
 | `provisional` | `true` nếu ngày đó chưa được Cost Explorer chốt số liệu (tạm tính) |
+| `month_impact` | `delta × số ngày còn lại trong tháng`: chi phí thêm nếu tiếp diễn |
+| `known` | `true` nếu service nằm trong `known` của file config |
 
 Các dòng được sắp theo ngày mới nhất trước, trong cùng ngày thì `delta` lớn trước.
 
@@ -257,7 +292,7 @@ CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ
 
 ## Demo offline
 
-Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính). Demo không gọi AWS và không tốn phí.
+Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính), RDS tăng $7 (chỉ bị báo nhờ ngưỡng riêng trong `demo/cost-anomaly.toml`), AWS Backup ngừng chạy (DROP), Bedrock được đánh dấu `known`. Demo không gọi AWS và không tốn phí.
 
 ```sh
 uv sync

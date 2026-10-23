@@ -39,3 +39,9 @@ def baseline_days(day: date, n: int) -> list[date]:
 def date_range(start: date, end: date) -> list[date]:
     """Days in [start, end)."""
     return [start + timedelta(days=i) for i in range((end - start).days)]
+
+
+def days_left_in_month(day: date) -> int:
+    """Days from `day` to the end of its month, both included."""
+    next_month = date(day.year + day.month // 12, day.month % 12 + 1, 1)
+    return (next_month - day).days

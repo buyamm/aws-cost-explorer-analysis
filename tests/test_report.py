@@ -41,13 +41,15 @@ def test_rows_sorted_by_date_then_delta_desc(tmp_path):
         "metric": "usage",
         "driver": "usage",
         "provisional": "false",
+        "month_impact": "0.0000",
+        "known": "false",
     }
 
 
 def test_header_keeps_old_columns_first():
     assert FIELDS == [
         "date", "service", "kind", "cost", "baseline_median", "mad", "robust_z", "delta",
-        "metric", "driver", "provisional",
+        "metric", "driver", "provisional", "month_impact", "known",
     ]
 
 
@@ -56,3 +58,11 @@ def test_rate_driven_provisional_row(tmp_path):
     write_csv([Anomaly(date(2026, 10, 14), "Fargate", SPIKE, 80, 52, 1, 18.9, 28, AMORTIZED, RATE, True)], out)
     (row,) = read_rows(out)
     assert (row["metric"], row["driver"], row["provisional"]) == ("amortized", "rate", "true")
+
+
+def test_month_impact_and_known_columns(tmp_path):
+    out = tmp_path / "a.csv"
+    a = Anomaly(date(2026, 10, 12), "Bedrock", SPIKE, 80, 50, 1, 20.2, 30, month_impact=600, known=True)
+    write_csv([a], out)
+    (row,) = read_rows(out)
+    assert (row["month_impact"], row["known"]) == ("600.0000", "true")

@@ -5,9 +5,9 @@ from html import escape
 from pathlib import Path
 
 from .analysis import COLUMNS, FORMULA, WHY_ROBUST, Report, usd
-from .detect import NEW_SERVICE, SPIKE
+from .detect import DROP, NEW_SERVICE, SPIKE
 
-KIND_LABEL = {SPIKE: "SPIKE", NEW_SERVICE: "NEW_SERVICE"}
+KIND_LABEL = {SPIKE: "SPIKE", NEW_SERVICE: "NEW_SERVICE", DROP: "DROP"}
 
 CSS = """
 :root {
@@ -15,7 +15,7 @@ CSS = """
   --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
   --series: #2a78d6; --band: rgba(42,120,214,0.10); --eval: rgba(11,11,11,0.04);
-  --spike: #d03b3b; --new: #ec835a;
+  --spike: #d03b3b; --new: #ec835a; --drop: #7b4fc9;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -55,6 +55,8 @@ ul.insights li { margin: 6px 0; }
 .key-eval { width: 14px; height: 10px; background: var(--eval); border: 1px solid var(--border); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--spike); flex: none; }
 .diamond { width: 8px; height: 8px; background: var(--new); transform: rotate(45deg); flex: none; }
+.tri { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 9px solid var(--drop); flex: none; }
 .multiples { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 12px; }
 .chart { position: relative; min-height: 210px; }
 .chart svg { display: block; overflow: visible; }
@@ -67,7 +69,7 @@ ul.insights li { margin: 6px 0; }
 .median { fill: none; stroke: var(--ink-2); stroke-width: 1; }
 .cost { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .mk { stroke: var(--surface); stroke-width: 2; }
-.mk.spike { fill: var(--spike); } .mk.new { fill: var(--new); }
+.mk.spike { fill: var(--spike); } .mk.new { fill: var(--new); } .mk.drop { fill: var(--drop); }
 .cross { stroke: var(--muted); stroke-width: 1; }
 .tip { position: absolute; pointer-events: none; z-index: 2; min-width: 170px; background: var(--surface);
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
@@ -172,6 +174,7 @@ JS = r"""
       if (i < 0) continue;
       const cx = x(i), cy = y(pts[i].c);
       if (a.kind === 'SPIKE') el('circle', {cx, cy, r: 5, class: 'mk spike'}, svg);
+      else if (a.kind === 'DROP') el('path', {d: `M${cx - 6},${cy - 5}L${cx + 6},${cy - 5}L${cx},${cy + 6}Z`, class: 'mk drop'}, svg);
       else el('path', {d: `M${cx},${cy - 6.5}L${cx + 6.5},${cy}L${cx},${cy + 6.5}L${cx - 6.5},${cy}Z`, class: 'mk new'}, svg);
     }
 
@@ -192,7 +195,7 @@ JS = r"""
         tipRow(tip, css('--axis'), usd(Math.max(p.t, p.m)), 'Ngưỡng cảnh báo');
       }
       const kind = kinds[p.d];
-      if (kind) tipRow(tip, css(kind === 'SPIKE' ? '--spike' : '--new'), kind, 'bất thường');
+      if (kind) tipRow(tip, css({SPIKE: '--spike', DROP: '--drop'}[kind] || '--new'), kind, 'bất thường');
       tip.style.display = 'block';
       const left = x(cur) + 12 + tip.offsetWidth > W ? x(cur) - 12 - tip.offsetWidth : x(cur) + 12;
       tip.style.left = left + 'px';
@@ -223,7 +226,7 @@ JS = r"""
 
 
 def badge(kind: str) -> str:
-    mark = '<span class="dot"></span>' if kind == SPIKE else '<span class="diamond"></span>'
+    mark = {SPIKE: '<span class="dot"></span>', DROP: '<span class="tri"></span>'}.get(kind, '<span class="diamond"></span>')
     return f'<span class="badge">{mark}{KIND_LABEL[kind]}</span>'
 
 
@@ -277,6 +280,7 @@ def section_charts(report: Report) -> str:
         '<span><i class="key-band"></i>Vùng bình thường (từ median tới ngưỡng cảnh báo)</span>'
         '<span><i class="dot"></i>SPIKE</span>'
         '<span><i class="diamond"></i>NEW_SERVICE</span>'
+        '<span><i class="tri"></i>DROP</span>'
         '<span><i class="key-eval"></i>Khung đánh giá</span>'
         "</div>"
     )
@@ -318,6 +322,7 @@ def section_table(report: Report) -> str:
         f'<td class="num">{escape(usd(r.anomaly.mad))}</td>'
         f'<td class="num">{"—" if r.anomaly.robust_z is None else f"{r.anomaly.robust_z:.2f}"}</td>'
         f'<td class="num">{escape(usd(r.anomaly.delta))}</td>'
+        f'<td class="num">{escape(usd(r.anomaly.month_impact))}</td>'
         f"<td>{escape(r.severity)}</td>"
         f'<td class="why">{escape(r.explanation)}</td>'
         "</tr>"
@@ -329,7 +334,7 @@ def section_table(report: Report) -> str:
         f"mạnh (z &lt; {4 * report.settings.k:g}), rất mạnh (z ≥ {4 * report.settings.k:g}).</p>"
         '<div class="card table-wrap"><table><thead><tr>'
         "<th>Ngày</th><th>Service</th><th>Loại</th><th>Chi phí</th><th>Median</th><th>MAD</th>"
-        "<th>z</th><th>Delta</th><th>Mức</th><th>Giải thích</th>"
+        "<th>z</th><th>Delta</th><th>Tác động tháng</th><th>Mức</th><th>Giải thích</th>"
         f"</tr></thead><tbody>{body}</tbody></table></div>"
     )
 
@@ -380,7 +385,7 @@ def render_html(report: Report) -> str:
     affected = len(report.rollups)
     tiles = "".join(
         [
-            tile("Bất thường", str(len(report.rows)), f"{report.spike_count} SPIKE · {report.new_count} NEW_SERVICE"),
+            tile("Bất thường", str(len(report.rows)), report.kind_summary.replace(", ", " · ")),
             tile("Phần vượt mức bình thường", usd(report.excess), "tổng delta của các ngày bất thường"),
             tile("Chi phí khung đánh giá", usd(report.eval_spend), f"{len(w.eval_days)} ngày, mọi service"),
             tile("Service bị ảnh hưởng", str(affected)),

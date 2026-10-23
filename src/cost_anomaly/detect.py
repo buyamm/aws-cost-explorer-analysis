@@ -3,13 +3,14 @@ from datetime import date
 from statistics import median
 
 from .config import Settings
-from .dates import baseline_days
+from .dates import baseline_days, days_left_in_month
 from .transform import CostMatrix
 
 MAD_TO_SIGMA = 1.4826
 
 SPIKE = "SPIKE"
 NEW_SERVICE = "NEW_SERVICE"
+DROP = "DROP"
 
 # Anomaly.metric (which measure the figures come from) and Anomaly.driver
 USAGE = "usage"
@@ -30,6 +31,8 @@ class Anomaly:
     metric: str = USAGE  # figures above come from the usage or the amortized measure
     driver: str = USAGE  # USAGE or RATE (coverage/price change)
     provisional: bool = False
+    known: bool = False  # listed under `known` in the config: reported, not alerted
+    month_impact: float = 0.0  # delta × days left in the month: cost if it continues
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,13 @@ def classify(s: Score, settings: Settings) -> str | None:
         return NEW_SERVICE if s.cost >= settings.new_threshold else None
     if s.robust_z > settings.k and s.delta >= settings.min_delta:
         return SPIKE
+    if (
+        settings.detect_drops
+        and s.baseline_median >= settings.drop_min_median
+        and s.cost <= settings.drop_ratio * s.baseline_median
+        and s.robust_z < -settings.k
+    ):
+        return DROP
     return None
 
 
@@ -95,23 +105,34 @@ def detect(
     amortized: CostMatrix | None = None,
     provisional: frozenset[date] = frozenset(),
 ) -> list[Anomaly]:
-    """Flag each service/day on the usage measure, or else on the amortized measure (spikes only)."""
+    """Flag each service/day on the usage measure, else an amortized spike, else a drop in both measures."""
     amortized = matrix if amortized is None else amortized
     anomalies: list[Anomaly] = []
-    for service in sorted(matrix.keys() | amortized.keys()):
+    for service in sorted((matrix.keys() | amortized.keys()) - settings.ignore):
+        svc = settings.for_service(service)
         usage_series, amortized_series = matrix.get(service, {}), amortized.get(service, {})
         for day in eval_days:
-            su, sa = score_pair(usage_series, amortized_series, day, settings)
-            kind = classify(su, settings)
+            su, sa = score_pair(usage_series, amortized_series, day, svc)
+            kind = classify(su, svc)
             if kind == NEW_SERVICE:
                 anomalies.append(_anomaly(day, service, kind, su, USAGE, USAGE))
             elif kind == SPIKE:
-                anomalies.append(_anomaly(day, service, kind, su, USAGE, driver(su, sa, settings.driver_tolerance)))
-            elif classify(sa, settings) == SPIKE:
-                anomalies.append(_anomaly(day, service, SPIKE, sa, AMORTIZED, driver(su, sa, settings.driver_tolerance)))
-    return [replace(a, provisional=True) if a.date in provisional else a for a in anomalies]
+                anomalies.append(_anomaly(day, service, kind, su, USAGE, driver(su, sa, svc.driver_tolerance)))
+            elif (paid_kind := classify(sa, svc)) == SPIKE:
+                anomalies.append(_anomaly(day, service, SPIKE, sa, AMORTIZED, driver(su, sa, svc.driver_tolerance)))
+            elif paid_kind == DROP and (kind == DROP or su.baseline_median == 0):
+                # What is paid collapsed and usage agrees, so it's not a commitment purchase.
+                # Fully RI-covered usage reads $0, so only the paid measure can show it.
+                s, metric = (sa, AMORTIZED) if su.baseline_median == 0 else (su, USAGE)
+                anomalies.append(_anomaly(day, service, DROP, s, metric, USAGE))
+    return [
+        replace(a, provisional=a.date in provisional, known=a.service in settings.known) for a in anomalies
+    ]
 
 
 def _anomaly(day: date, service: str, kind: str, s: Score, metric: str, drv: str) -> Anomaly:
-    z = s.robust_z if kind == SPIKE else None
-    return Anomaly(day, service, kind, s.cost, s.baseline_median, s.mad, z, s.delta, metric, drv)
+    z = None if kind == NEW_SERVICE else s.robust_z
+    return Anomaly(
+        day, service, kind, s.cost, s.baseline_median, s.mad, z, s.delta, metric, drv,
+        month_impact=s.delta * days_left_in_month(day),
+    )

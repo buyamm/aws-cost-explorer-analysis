@@ -4,7 +4,7 @@ import pytest
 
 from cost_anomaly.config import Settings
 from cost_anomaly.dates import compute_windows, date_range
-from cost_anomaly.detect import AMORTIZED, NEW_SERVICE, RATE, SPIKE, USAGE, Score, detect, driver, score, score_pair
+from cost_anomaly.detect import AMORTIZED, DROP, NEW_SERVICE, RATE, SPIKE, USAGE, Score, detect, driver, score, score_pair
 
 TODAY = date(2026, 10, 15)
 SETTINGS = Settings()
@@ -38,8 +38,40 @@ def test_large_delta_but_volatile_service_is_ignored():
     assert run(series([50, 100, 150], {EVAL_DAY: 200})) == []
 
 
-def test_drop_is_ignored():
-    assert run(series([98, 100, 102], {EVAL_DAY: 0})) == []
+def test_service_falling_to_near_zero_is_a_drop():
+    (a,) = run(series([98, 100, 102], {EVAL_DAY: 3}))
+    assert (a.date, a.kind, a.metric, a.driver) == (EVAL_DAY, DROP, USAGE, USAGE)
+    assert a.delta == -97 and a.robust_z < -SETTINGS.k
+
+
+def test_drop_needs_a_baseline_worth_alerting():
+    assert run(series([4.9, 5.0, 5.1], {EVAL_DAY: 0})) == []  # median $5 < drop_min_median $10
+
+
+def test_partial_fall_is_not_a_drop():
+    assert run(series([98, 100, 102], {EVAL_DAY: 30})) == []
+
+
+def test_drops_can_be_disabled():
+    s = series([98, 100, 102], {EVAL_DAY: 0})
+    assert detect({"svc": s}, WINDOWS.eval_days, Settings(detect_drops=False)) == []
+
+
+def test_reserved_instance_purchase_is_not_a_drop():
+    # RI-covered usage reads $0 in the usage measure; what is paid only falls by the discount.
+    usage = series([98, 100, 102], {d: 0.0 for d in DAYS if d >= EVAL_DAY})
+    paid = series([98, 100, 102], {d: 50.0 for d in DAYS if d >= EVAL_DAY})
+    assert run_both(usage, paid) == []
+
+
+def test_savings_plan_purchase_is_not_a_drop():
+    paid = series([98, 100, 102], {d: 60.0 for d in DAYS if d >= EVAL_DAY})
+    assert run_both(series([98, 100, 102]), paid) == []
+
+
+def test_fully_ri_covered_service_outage_is_an_amortized_drop():
+    (a,) = run_both(series([0.0]), series([59, 60, 61], {EVAL_DAY: 0.0}))
+    assert (a.kind, a.metric, a.delta) == (DROP, AMORTIZED, -60)
 
 
 def test_flat_baseline_mad_zero():
@@ -150,3 +182,27 @@ def test_new_service_comes_from_usage_only_and_is_usage_driven():
 def test_without_amortized_matrix_results_are_usage_driven():
     (a,) = run(series([98, 100, 102], {EVAL_DAY: 130}))
     assert (a.metric, a.driver, a.provisional) == (USAGE, USAGE, False)
+
+
+def test_service_override_changes_only_that_service():
+    settings = Settings(service_overrides={"rds": {"min_delta": 5}})
+    s = series([179, 180, 181], {EVAL_DAY: 187})  # +$7, z ≈ 4.7
+    found = detect({"rds": s, "lambda": dict(s)}, WINDOWS.eval_days, settings)
+    assert [(a.service, a.kind) for a in found] == [("rds", SPIKE)]
+
+
+def test_ignored_service_is_skipped_and_known_service_marked():
+    settings = Settings(ignore=frozenset({"tax"}), known=frozenset({"bedrock"}))
+    spike = series([98, 100, 102], {EVAL_DAY: 300})
+    found = detect({"tax": spike, "bedrock": dict(spike), "ec2": dict(spike)}, WINDOWS.eval_days, settings)
+    assert [(a.service, a.known) for a in found] == [("bedrock", True), ("ec2", False)]
+
+
+def test_month_impact_is_delta_times_days_left_in_month():
+    (a,) = run(series([98, 100, 102], {EVAL_DAY: 130}))
+    assert a.month_impact == 30 * 20  # Oct 12 → Oct 31 inclusive
+
+
+def test_drop_month_impact_is_negative():
+    (a,) = run(series([98, 100, 102], {EVAL_DAY: 0}))
+    assert a.month_impact == -100 * 20
