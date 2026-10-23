@@ -116,3 +116,18 @@ def test_corrupt_or_unknown_state_is_an_error(tmp_path, text):
     path.write_text(text)
     with pytest.raises(StateError, match="state.json"):
         LocalFileStore(path).load()
+
+
+def test_cad_match_is_kept_on_the_incident():
+    state, _ = run(State(), [anomaly(11, cad_match=False), anomaly(12, cad_match=True)])
+    assert state.incidents[0].cad_match is True
+
+
+def test_state_without_cad_field_still_loads(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "incidents": [{"id": "x", "service": "EC2", "kind": "SPIKE", "start": "2026-10-11", '
+        '"end": "2026-10-11", "peak_delta": 50, "month_impact": 1000, "driver": "usage", "provisional": false, '
+        '"known": false, "last_alerted_peak": 50, "alerted_at": "2026-10-12T08:00:00+00:00"}]}'
+    )
+    assert LocalFileStore(path).load().incidents[0].cad_match is False

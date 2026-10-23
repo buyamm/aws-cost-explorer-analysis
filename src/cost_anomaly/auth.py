@@ -7,14 +7,20 @@ import boto3
 import botocore.session
 from botocore.exceptions import BotoCoreError, ClientError
 
-from .guard import install_guard
+from .guard import ALLOWED_OPERATIONS, install_guard
 
-# Effective permissions = role policy ∩ session policy, so even an AdministratorAccess
-# role yields credentials that can only read Cost Explorer.
-SESSION_POLICY = {
-    "Version": "2012-10-17",
-    "Statement": [{"Effect": "Allow", "Action": "ce:GetCostAndUsage", "Resource": "*"}],
-}
+
+def session_policy(operations: frozenset[str]) -> dict:
+    """Effective permissions = role policy ∩ session policy, so even an AdministratorAccess
+    role yields credentials that can only make these Cost Explorer calls."""
+    actions = sorted(f"ce:{op}" for op in operations)
+    return {
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Action": actions[0] if len(actions) == 1 else actions, "Resource": "*"}],
+    }
+
+
+SESSION_POLICY = session_policy(ALLOWED_OPERATIONS)
 SESSION_NAME = "cost-anomaly"
 DEFAULT_DURATION = 3600
 
@@ -54,13 +60,14 @@ def assume_role_session(
     profile: str,
     prompt: Callable[[str], str] = getpass.getpass,
     session_factory: Callable[..., boto3.Session] = boto3.Session,
+    operations: frozenset[str] = ALLOWED_OPERATIONS,
 ) -> boto3.Session:
-    """Switch into the profile's role with a session policy limited to ce:GetCostAndUsage."""
+    """Switch into the profile's role with a session policy limited to `operations` (Cost Explorer)."""
     rp = read_role_profile(profile)
     params = {
         "RoleArn": rp.role_arn,
         "RoleSessionName": SESSION_NAME,
-        "Policy": json.dumps(SESSION_POLICY),
+        "Policy": json.dumps(session_policy(operations)),
         "DurationSeconds": rp.duration_seconds,
     }
     if rp.external_id:

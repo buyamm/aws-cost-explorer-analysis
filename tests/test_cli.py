@@ -14,6 +14,7 @@ from cost_anomaly import cli
 from cost_anomaly.config import Settings
 from cost_anomaly.dates import compute_windows, date_range
 from cost_anomaly.fetch import build_request
+from cost_anomaly.guard import ALLOWED_OPERATIONS, CAD_OPERATIONS
 
 TODAY = date(2026, 10, 15)
 WINDOWS = compute_windows(TODAY, Settings())
@@ -28,8 +29,9 @@ def fake_session(monkeypatch, ce_client):
             created["service"], created["region"] = service, region_name
             return ce_client
 
-    def fake_assume_role_session(profile):
+    def fake_assume_role_session(profile, operations=ALLOWED_OPERATIONS):
         created["profile"] = profile
+        created["operations"] = operations
         return FakeSession()
 
     monkeypatch.setattr(cli, "assume_role_session", fake_assume_role_session)
@@ -56,7 +58,9 @@ def test_end_to_end_writes_csv(tmp_path, fake_session, ce_client, capsys):
         stub.assert_no_pending_responses()
 
     assert code == 0
-    assert fake_session == {"profile": "cost-readonly", "service": "ce", "region": "us-east-1"}
+    assert fake_session == {
+        "profile": "cost-readonly", "operations": ALLOWED_OPERATIONS, "service": "ce", "region": "us-east-1"
+    }
     with open(out, newline="") as f:
         rows = list(csv.DictReader(f))
     assert [(r["date"], r["service"], r["kind"]) for r in rows] == [
@@ -298,3 +302,15 @@ def test_fail_on_anomaly_without_state_ignores_known(tmp_path, fake_session, ce_
     cfg = tmp_path / "c.toml"
     cfg.write_text('known = ["Amazon EC2", "Amazon Bedrock"]\n')
     assert run_alerting(tmp_path, ce_client, "--fail-on-anomaly", "--config", str(cfg))[0] == 0
+
+
+def test_with_cad_requests_get_anomalies_and_warns_when_unavailable(tmp_path, fake_session, ce_client, capsys):
+    out = tmp_path / "a.csv"
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", build_response())
+        stub.add_client_error("get_anomalies", service_error_code="AccessDeniedException", service_message="no")
+        code = cli.main(["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--no-report", "--with-cad"])
+    assert code == 0 and fake_session["operations"] == CAD_OPERATIONS
+    assert "AWS CAD unavailable" in capsys.readouterr().err
+    with open(out, newline="") as f:
+        assert {r["cad_match"] for r in csv.DictReader(f)} == {""}

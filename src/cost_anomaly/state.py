@@ -30,6 +30,7 @@ class Incident:
     known: bool
     last_alerted_peak: float | None = None  # None: never reported
     alerted_at: str | None = None
+    cad_match: bool = False  # AWS Cost Anomaly Detection also flagged one of its days
 
     @property
     def id(self) -> str:
@@ -102,6 +103,7 @@ def _from_run(items: list[Anomaly], start: date, end: date) -> Incident:
         driver=latest.driver,
         provisional=latest.provisional,
         known=latest.known,
+        cad_match=any(a.cad_match for a in items),
     )
 
 
@@ -117,6 +119,7 @@ def _combine(old: Incident, new: Incident) -> Incident:
         driver=latest.driver,
         provisional=latest.provisional,
         known=new.known,
+        cad_match=old.cad_match or new.cad_match,
     )
 
 

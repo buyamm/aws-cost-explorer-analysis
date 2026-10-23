@@ -5,8 +5,8 @@ import boto3
 import pytest
 from botocore.stub import Stubber
 
-from cost_anomaly.auth import SESSION_POLICY, AuthError, assume_role_session, read_role_profile
-from cost_anomaly.guard import ForbiddenOperation
+from cost_anomaly.auth import SESSION_POLICY, AuthError, assume_role_session, read_role_profile, session_policy
+from cost_anomaly.guard import ALLOWED_OPERATIONS, CAD_OPERATIONS, ForbiddenOperation
 
 ROLE_ARN = "arn:aws:iam::111111111111:role/Admin"
 MFA = "arn:aws:iam::222222222222:mfa/me"
@@ -126,3 +126,29 @@ def test_sts_client_is_guarded(switch_role_profile, sts_client):
         assume_role_session(switch_role_profile, prompt=lambda _: "123456", session_factory=factory)
         with pytest.raises(ForbiddenOperation):
             sts_client.get_caller_identity()
+
+
+def test_session_policy_is_built_from_the_allowlist():
+    assert session_policy(ALLOWED_OPERATIONS) == SESSION_POLICY
+    (stmt,) = session_policy(CAD_OPERATIONS)["Statement"]
+    assert stmt["Action"] == ["ce:GetAnomalies", "ce:GetCostAndUsage"]
+    assert CAD_OPERATIONS - ALLOWED_OPERATIONS == {"GetAnomalies"}
+
+
+def test_assume_role_sends_the_requested_operations(switch_role_profile, sts_client):
+    with Stubber(sts_client) as stub:
+        stub.add_response(
+            "assume_role",
+            assume_role_response(),
+            {
+                "RoleArn": ROLE_ARN,
+                "RoleSessionName": "cost-anomaly",
+                "Policy": json.dumps(session_policy(CAD_OPERATIONS)),
+                "DurationSeconds": 3600,
+                "SerialNumber": MFA,
+                "TokenCode": "123456",
+            },
+        )
+        assume_role_session(switch_role_profile, prompt=lambda _: "123456",
+                            session_factory=FakeSessionFactory(sts_client), operations=CAD_OPERATIONS)
+        stub.assert_no_pending_responses()

@@ -271,3 +271,39 @@ def test_tables_show_month_impact():
     r = report_for({"EC2": series([98, 100, 102], {date(2026, 10, 12): 130})})
     assert "Tác động tháng" in render_html(r) and "$600.00" in render_html(r)
     assert "Tác động tháng" in render_markdown(r)
+
+
+def cad_report(cad, cad_error=None):
+    from cost_anomaly.cad import match
+
+    anomalies = detect(MATRIX, WINDOWS.eval_days, SETTINGS)
+    if cad is not None:
+        anomalies = match(anomalies, cad, WINDOWS.eval_days[-1])
+    return build_report(MATRIX, WINDOWS, SETTINGS, anomalies, "demo", GENERATED, cad=cad, cad_error=cad_error)
+
+
+def test_cad_section_counts_both_tool_only_and_cad_only():
+    from cost_anomaly.cad import CadAnomaly
+
+    cad = [
+        CadAnomaly("a-ec2", date(2026, 10, 9), date(2026, 10, 10), frozenset({"EC2"}), 380.0, 0.9),
+        CadAnomaly("a-s3", date(2026, 10, 7), date(2026, 10, 8), frozenset({"S3"}), 14.2, 0.6),
+    ]
+    r = cad_report(cad)
+    assert (r.cad_both, r.cad_tool_only, [c.id for c in r.cad_only]) == (2, 2, ["a-s3"])
+    html, md = render_html(r), render_markdown(r)
+    assert "Đối chiếu AWS CAD" in html and "S3" in html and "$14.20" in html
+    assert "## Đối chiếu AWS CAD" in md
+
+
+def test_cad_unavailable_is_noted():
+    r = cad_report(None, cad_error="GetAnomalies failed (AccessDeniedException): no")
+    assert "không lấy được" in render_html(r) and "AccessDeniedException" in render_markdown(r)
+
+
+def test_no_cad_section_without_with_cad():
+    assert "Đối chiếu AWS CAD" not in render_html(report_for(MATRIX))
+
+
+def test_columns_document_cad_match():
+    assert "cad_match" in {c for c, _ in COLUMNS}

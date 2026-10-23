@@ -1,6 +1,8 @@
 import csv
 from datetime import date
 
+import pytest
+
 from cost_anomaly.detect import AMORTIZED, NEW_SERVICE, RATE, SPIKE, Anomaly
 from cost_anomaly.report import FIELDS, write_csv
 
@@ -43,13 +45,14 @@ def test_rows_sorted_by_date_then_delta_desc(tmp_path):
         "provisional": "false",
         "month_impact": "0.0000",
         "known": "false",
+        "cad_match": "",
     }
 
 
 def test_header_keeps_old_columns_first():
     assert FIELDS == [
         "date", "service", "kind", "cost", "baseline_median", "mad", "robust_z", "delta",
-        "metric", "driver", "provisional", "month_impact", "known",
+        "metric", "driver", "provisional", "month_impact", "known", "cad_match",
     ]
 
 
@@ -66,3 +69,10 @@ def test_month_impact_and_known_columns(tmp_path):
     write_csv([a], out)
     (row,) = read_rows(out)
     assert (row["month_impact"], row["known"]) == ("600.0000", "true")
+
+
+@pytest.mark.parametrize("value, text", [(True, "true"), (False, "false"), (None, "")])
+def test_cad_match_column(tmp_path, value, text):
+    out = tmp_path / "a.csv"
+    write_csv([Anomaly(date(2026, 10, 12), "EC2", SPIKE, 80, 50, 1, 20.2, 30, cad_match=value)], out)
+    assert read_rows(out)[0]["cad_match"] == text
