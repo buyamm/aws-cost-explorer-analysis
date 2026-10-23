@@ -43,6 +43,11 @@ Pipeline in `cli.main`: `compute_windows` → `assume_role_session` → `install
 - `html_report` renders a self-contained page: inline CSS/JS, charts drawn client-side from a JSON `<script>` block (escape `</` there; service names are untrusted), light/dark tokens. `md_report` renders the same content minus charts.
 - All report prose is Vietnamese, matching the README.
 
+## Workflow
+
+- Features go through Spec Kit (`/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → `/speckit-implement`); specs live under `specs/`, templates under `.specify/`.
+- Implementation follows superpowers' `test-driven-development` skill: write a failing test, watch it fail with `uv run pytest`, then the minimal code to pass, then refactor. No production code without a failing test first.
+
 ## Tests and demo
 
 `tests/conftest.py::results_from_matrix` builds CE `ResultsByTime` payloads from a `{service: {day: cost}}` dict. Use it to write detection/e2e tests instead of hand-writing JSON. CLI tests monkeypatch `cli.assume_role_session`.
