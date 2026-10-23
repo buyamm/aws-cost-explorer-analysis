@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 from dataclasses import replace
@@ -7,7 +8,9 @@ from pathlib import Path
 
 from botocore.exceptions import BotoCoreError
 
-from .analysis import build_report
+from .alert import WEBHOOK_ENV, AlertError, build_message, send, validate_webhook, webhook_from_env
+from .alerting import process
+from .analysis import build_report, usd
 from .auth import AuthError, assume_role_session
 from .config import Settings
 from .fetch import CostExplorerError, TooManyPages
@@ -16,6 +19,7 @@ from .md_report import write_markdown
 from .pipeline import run
 from .report import write_csv
 from .settings_file import ConfigError, load_config
+from .state import Change, LocalFileStore, State, StateError
 
 defaults = Settings()
 # Every evaluated day needs a full baseline inside the fetched lookback window.
@@ -59,6 +63,21 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument("--no-drop", action="store_true", help="do not report services that fall to near zero (DROP)")
     p.add_argument(
+        "--state",
+        type=Path,
+        help="incidents JSON; group consecutive anomalous days and alert only new or worsened incidents",
+    )
+    p.add_argument(
+        "--fail-on-anomaly",
+        action="store_true",
+        help="exit 1 when there is something new (new/worse incidents with --state, else any non-known anomaly)",
+    )
+    p.add_argument(
+        "--alert-dry-run",
+        action="store_true",
+        help=f"print the Slack message instead of sending it to ${WEBHOOK_ENV}; do not update --state",
+    )
+    p.add_argument(
         "--no-report",
         action="store_true",
         help="only write the CSV (skip <output>_report.html and <output>_report.md)",
@@ -85,11 +104,27 @@ def build_settings(args: argparse.Namespace) -> Settings:
     return replace(settings, **{name: value for name, value in flags.items() if value is not None})
 
 
+class MemoryStore:
+    """No --state: every incident in this run counts as new, nothing is remembered."""
+
+    def load(self) -> State:
+        return State()
+
+    def save(self, state: State) -> None:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    webhook = webhook_from_env()
+    store = LocalFileStore(args.state) if args.state else MemoryStore()
+    # Fail fast on local problems, before the MFA prompt and any billable request.
     try:
         settings = build_settings(args)
-    except ConfigError as e:
+        if webhook and not args.alert_dry_run:
+            validate_webhook(webhook)
+        store.load()
+    except (ConfigError, AlertError, StateError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     today = args.end_date or datetime.now(timezone.utc).date()
@@ -105,14 +140,40 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(anomalies, args.output)
     print(f"Found {len(anomalies)} anomalies → {args.output}")
 
+    now = datetime.now(timezone.utc)
+    location = args.output
     if not args.no_report:
         html_path, md_path = report_paths(args.output)
-        now = datetime.now(timezone.utc)
         report = build_report(result.usage, result.windows, settings, anomalies, args.profile, now, result.amortized)
         write_html(report, html_path)
         write_markdown(report, md_path)
         print(f"Report → {html_path}, {md_path}")
-    return 0
+        location = html_path
+
+    if not (args.state or webhook or args.alert_dry_run or args.fail_on_anomaly):
+        return 0
+
+    def deliver(changes: list[Change]) -> None:
+        payload = build_message(changes, args.profile, str(location))
+        if args.alert_dry_run:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        elif webhook:
+            send(webhook, payload)
+            print(f"Slack: sent {len(changes)} new/worse incident(s)")
+        else:
+            print(f"{len(changes)} new/worse incident(s):")
+            for c in changes:
+                i = c.incident
+                print(f"  {c.reason:<5} {i.kind:<11} {i.service}  {i.start} → {i.end}  peak {usd(i.peak_delta)}/day")
+
+    try:
+        changes = process(
+            anomalies, settings, result.windows.fetch_start, store, deliver, now.isoformat(), save=not args.alert_dry_run
+        )
+    except AlertError as e:
+        print(f"error: alert not delivered, will retry next run: {e}", file=sys.stderr)
+        return 3
+    return 1 if args.fail_on_anomaly and changes else 0
 
 
 def report_paths(output: Path) -> tuple[Path, Path]:

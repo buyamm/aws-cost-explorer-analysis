@@ -45,3 +45,14 @@ def days_left_in_month(day: date) -> int:
     """Days from `day` to the end of its month, both included."""
     next_month = date(day.year + day.month // 12, day.month % 12 + 1, 1)
     return (next_month - day).days
+
+
+def runs_of(days: list[date]) -> list[tuple[date, date]]:
+    """Consecutive days grouped into (first, last) runs, oldest first."""
+    runs: list[tuple[date, date]] = []
+    for d in sorted(days):
+        if runs and d - runs[-1][1] == timedelta(days=1):
+            runs[-1] = (runs[-1][0], d)
+        else:
+            runs.append((d, d))
+    return runs

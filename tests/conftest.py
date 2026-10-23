@@ -48,9 +48,11 @@ def results_from_matrix(
 
 @pytest.fixture(autouse=True)
 def fake_aws_env(monkeypatch, tmp_path):
-    """Never touch real AWS credentials or config during tests."""
+    """Never touch real AWS credentials, config or Slack during tests."""
     for var in ("AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN", "AWS_ROLE_ARN"):
         monkeypatch.delenv(var, raising=False)
+    # A real webhook exported in the developer's shell must never receive test alerts.
+    monkeypatch.delenv("COST_ANOMALY_SLACK_WEBHOOK", raising=False)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
