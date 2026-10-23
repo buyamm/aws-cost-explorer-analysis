@@ -314,3 +314,78 @@ def test_with_cad_requests_get_anomalies_and_warns_when_unavailable(tmp_path, fa
     assert "AWS CAD unavailable" in capsys.readouterr().err
     with open(out, newline="") as f:
         assert {r["cad_match"] for r in csv.DictReader(f)} == {""}
+
+
+@pytest.fixture
+def pdf_calls(monkeypatch):
+    """Fake browser lookup and PDF printing; records what the CLI asked for."""
+    calls = {"find": 0, "write": [], "fail": None}
+
+    def find_browser():
+        calls["find"] += 1
+        return "/fake/chrome"
+
+    def write_pdf(html_path, pdf_path, browser):
+        calls["write"].append((html_path, pdf_path, browser))
+        if calls["fail"]:
+            raise cli.PdfError(calls["fail"])
+        pdf_path.write_bytes(b"%PDF fake")
+
+    monkeypatch.setattr(cli, "find_browser", find_browser)
+    monkeypatch.setattr(cli, "write_pdf", write_pdf)
+    return calls
+
+
+def run_pdf(tmp_path, ce_client, *extra):
+    out = tmp_path / "anomalies.csv"
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", build_response())
+        code = cli.main(["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", *extra])
+    return code, out
+
+
+def test_pdf_with_no_report_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "assume_role_session", lambda p, **k: pytest.fail("must not authenticate"))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--profile", "p", "--pdf", "--no-report", "--output", str(tmp_path / "a.csv")])
+    assert e.value.code == 2
+
+
+def test_pdf_without_browser_exits_2_before_auth(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "assume_role_session", lambda p, **k: pytest.fail("must not authenticate"))
+    monkeypatch.setattr("cost_anomaly.pdf.shutil.which", lambda n: None)
+    monkeypatch.setattr("cost_anomaly.pdf.os.path.exists", lambda p: False)
+    assert cli.main(["--profile", "p", "--pdf", "--output", str(tmp_path / "a.csv")]) == 2
+    assert "COST_ANOMALY_BROWSER" in capsys.readouterr().err
+    assert not (tmp_path / "a.csv").exists()
+
+
+def test_pdf_written_next_to_csv(tmp_path, fake_session, ce_client, pdf_calls, capsys):
+    code, out = run_pdf(tmp_path, ce_client, "--pdf")
+    assert code == 0
+    ((html, pdf, browser),) = pdf_calls["write"]
+    assert html == tmp_path / "anomalies_report.html" and html.exists()
+    assert pdf == tmp_path / "anomalies_report.pdf" and pdf.exists() and browser == "/fake/chrome"
+    assert "anomalies_report.pdf" in capsys.readouterr().out
+
+
+def test_pdf_failure_keeps_other_outputs_and_exits_2(tmp_path, fake_session, ce_client, pdf_calls, capsys):
+    pdf_calls["fail"] = "trình duyệt thoát với mã 1"
+    code, out = run_pdf(tmp_path, ce_client, "--pdf")
+    assert code == 2
+    assert out.exists() and (tmp_path / "anomalies_report.html").exists() and (tmp_path / "anomalies_report.md").exists()
+    assert "không tạo được PDF" in capsys.readouterr().err
+
+
+def test_pdf_failure_still_alerts_and_slack_failure_wins(tmp_path, fake_session, ce_client, pdf_calls, slack):
+    pdf_calls["fail"] = "boom"
+    assert run_pdf(tmp_path, ce_client, "--pdf")[0] == 2
+    assert len(slack.posts) == 1  # a PDF problem never suppresses the alert
+    slack.fail = True
+    assert run_pdf(tmp_path, ce_client, "--pdf")[0] == 3
+
+
+def test_no_pdf_never_looks_for_a_browser(tmp_path, fake_session, ce_client, pdf_calls):
+    assert run_pdf(tmp_path, ce_client)[0] == 0
+    assert pdf_calls == {"find": 0, "write": [], "fail": None}
+    assert not (tmp_path / "anomalies_report.pdf").exists()

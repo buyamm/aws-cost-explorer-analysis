@@ -4,7 +4,7 @@ Nothing here talks to AWS. The demo writes a throwaway AWS config, answers the M
 prompt itself, and stubs STS + Cost Explorer with botocore's Stubber, feeding 90 days
 of synthetic per-service costs with a few planted scenarios.
 
-    uv run python demo/run_demo.py [--end-date 2026-10-15] [--output demo/demo_anomalies.csv]
+    uv run python demo/run_demo.py [--end-date 2026-10-15] [--output demo/demo_anomalies.csv] [--pdf]
 """
 
 import argparse
@@ -311,6 +311,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--end-date", type=date.fromisoformat, default=datetime.now(timezone.utc).date())
     p.add_argument("--output", type=Path, default=Path(__file__).parent / "demo_anomalies.csv")
+    p.add_argument("--pdf", action="store_true", help="also print the report to PDF (needs Chrome, Chromium or Edge)")
     args = p.parse_args()
 
     tmp = Path(tempfile.mkdtemp(prefix="cost-anomaly-demo-"))
@@ -350,7 +351,7 @@ def main() -> int:
         return code
 
     header(f"Run 2 — today ({args.end_date}): only new or worse incidents reach Slack (dry run), cross-checked with AWS CAD")
-    extra = ["--output", str(args.output), "--config", config, "--state", state, "--alert-dry-run", "--with-cad"]
+    extra = ["--output", str(args.output), "--config", config, "--state", state, "--alert-dry-run", "--with-cad"] + ["--pdf"] * args.pdf
     code = run_cli(matrix, paid, args.end_date, extra, cad=simulate_cad(windows))
     if code != 0:
         return code

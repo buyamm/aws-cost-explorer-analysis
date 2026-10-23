@@ -7,6 +7,7 @@ Tool lấy chi phí 90 ngày gần nhất từ AWS Cost Explorer (DAILY, group t
 - `anomalies.csv`: bảng bất thường.
 - `anomalies_report.html`: report có biểu đồ, nhận định và giải thích từng con số. File tự chứa nên mở offline được.
 - `anomalies_report.md`: nội dung như HTML nhưng không có biểu đồ, tiện dán vào ticket, wiki hoặc chat.
+- `anomalies_report.pdf` (khi chạy với `--pdf`): bản in của report HTML, để gửi cho người không mở file HTML.
 
 ## Yêu cầu
 
@@ -127,12 +128,18 @@ Found 9 anomalies → anomalies.csv
 Report → anomalies_report.html, anomalies_report.md
 ```
 
-Mở `anomalies_report.html` bằng trình duyệt. Nên đọc theo thứ tự:
+Mở `anomalies_report.html` bằng trình duyệt. Đầu trang là một câu tóm tắt kết quả (số bất thường, số service, số tiền chi thêm) và các con số chính. Thanh trên cùng luôn hiện khi cuộn trang, gồm:
+
+- **Mục lục**: bấm để nhảy tới từng phần.
+- **Giao diện tối**: bật/tắt theme tối. Lần đầu mở, report theo cài đặt sáng/tối của hệ điều hành; sau khi chọn, trình duyệt nhớ lựa chọn cho các lần mở sau.
+- **Xuất PDF**: mở hộp thoại in của trình duyệt, chọn "Lưu dưới dạng PDF". Bản in luôn dùng theme sáng, ẩn các nút và bộ lọc, in đủ mọi dòng của bảng (kể cả dòng đang bị lọc) theo thứ tự mặc định, và không cắt dòng hay biểu đồ giữa hai trang.
+
+Nên đọc theo thứ tự:
 
 1. **Nhận định chính**: tổng chi phí các ngày đánh giá (mặc định 7, đổi bằng `--eval-days`), phần vượt mức bình thường, service đóng góp nhiều nhất. Phần này cũng cho biết mỗi bất thường là sự kiện một ngày, kéo dài nhiều ngày, hay vẫn còn ở ngày mới nhất.
 2. **Bước tiếp theo**: việc cần kiểm tra tương ứng với từng loại bất thường.
 3. **Biểu đồ** chi phí 90 ngày của từng service bất thường, có median, vùng bình thường và các điểm bị báo. Rê chuột (hoặc focus rồi dùng ←/→) để xem số liệu từng ngày.
-4. **Bảng bất thường**: mỗi dòng kèm giải thích các con số.
+4. **Bảng bất thường**: mỗi dòng kèm giải thích các con số. Có thể lọc theo loại (SPIKE/NEW_SERVICE/DROP), theo service, theo nhãn "tạm tính"/"đã biết", và bấm tiêu đề cột để sắp xếp. "Xóa lọc" đưa bảng về như ban đầu.
 5. **Biến động bị lọc**: những ngày có dấu hiệu tăng nhưng không bị báo, kèm lý do. Đọc mục này khi cần chỉnh ngưỡng.
 6. **Cấu hình thuật toán** và **Giải thích các cột**.
 
@@ -153,7 +160,12 @@ cost-anomaly --profile project-cost --eval-days 30
 
 # Chỉ ghi CSV
 cost-anomaly --profile project-cost --no-report
+
+# Ghi thêm anomalies_report.pdf (cần Chrome, Chromium hoặc Edge trên máy)
+cost-anomaly --profile project-cost --pdf
 ```
+
+`--pdf` dùng trình duyệt có sẵn trên máy ở chế độ headless để in report HTML, nên không cần cài thêm thư viện Python. Tool tìm trình duyệt theo thứ tự: biến môi trường `COST_ANOMALY_BROWSER` (đường dẫn tới file chạy), các lệnh `google-chrome`, `chromium`, `microsoft-edge` trong `PATH`, rồi Chrome/Chromium/Edge trong `/Applications` trên macOS. Nếu không tìm thấy, tool dừng với mã 2 trước khi hỏi MFA. Lambda không tạo PDF.
 
 Thư mục trong `--output` phải tồn tại trước khi chạy.
 
@@ -178,6 +190,7 @@ Thư mục trong `--output` phải tồn tại trước khi chạy.
 | `--no-provisional` | | Không đánh giá 2 ngày gần nhất (chưa chốt số liệu), quay về khung cũ T−9…T−3 |
 | `--end-date` | hôm nay (UTC) | Ngày kết thúc khung lấy dữ liệu, dạng `YYYY-MM-DD`, không tính vào khung |
 | `--no-report` | | Không ghi report HTML/Markdown |
+| `--pdf` | | Ghi thêm `<tên>_report.pdf` cạnh CSV. Không dùng chung với `--no-report` |
 
 Mã thoát:
 
@@ -186,6 +199,7 @@ Mã thoát:
 | `0` | Chạy thành công (kể cả khi có bất thường, nếu không dùng `--fail-on-anomaly`) |
 | `1` | Có `--fail-on-anomaly` và có sự cố mới/xấu đi (khi có `--state`), hoặc có bất thường ở service không thuộc `known` (khi không có `--state`) |
 | `2` | Tham số, file config, file state hoặc webhook sai, hoặc lỗi xác thực / Cost Explorer; không ghi CSV. Lỗi cục bộ được phát hiện trước khi hỏi MFA nên không tốn request nào |
+| `2` (khi có `--pdf`) | Không tìm thấy trình duyệt (báo trước khi hỏi MFA), hoặc in PDF thất bại. Khi in thất bại, CSV/HTML/Markdown vẫn được ghi và cảnh báo Slack vẫn được gửi |
 | `3` | Gửi Slack thất bại sau 3 lần thử. CSV/report vẫn được ghi, state giữ nguyên để lần chạy sau gửi lại |
 
 ### File config
@@ -386,7 +400,7 @@ Role có thể có quyền rộng, nhưng tool chỉ dùng đúng phần cần t
 - Khi chạy trên Lambda, tool không gọi AssumeRole nên không có session policy. Giới hạn quyền nằm ở inline policy của execution role (chỉ đúng các API và ARN ở bảng trên), cộng allowlist trong code: S3 chỉ `GetObject`/`PutObject`, SSM chỉ `GetParameter`, Cost Explorer như CLI.
 - Mỗi lần chạy thường tốn 1–2 request Cost Explorer ($0.01/request). `--max-pages` chặn trường hợp phân trang bất thường.
 
-CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ cho người có quyền xem chi phí, và không commit lên repo. `.gitignore` đã loại `*.csv`, `*_report.html` và `*_report.md`.
+CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ cho người có quyền xem chi phí, và không commit lên repo. `.gitignore` đã loại `*.csv`, `*_report.html`, `*_report.md` và `*_report.pdf`.
 
 ## Xử lý lỗi thường gặp
 
