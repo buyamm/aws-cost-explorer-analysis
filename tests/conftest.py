@@ -53,6 +53,8 @@ def fake_aws_env(monkeypatch, tmp_path):
         monkeypatch.delenv(var, raising=False)
     # A real webhook exported in the developer's shell must never receive test alerts.
     monkeypatch.delenv("COST_ANOMALY_SLACK_WEBHOOK", raising=False)
+    # --pdf must not pick up a browser from the developer's shell.
+    monkeypatch.delenv("COST_ANOMALY_BROWSER", raising=False)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")

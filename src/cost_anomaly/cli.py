@@ -17,6 +17,7 @@ from .fetch import CostExplorerError, TooManyPages
 from .guard import ALLOWED_OPERATIONS, CAD_OPERATIONS
 from .html_report import write_html
 from .md_report import write_markdown
+from .pdf import PdfError, find_browser, write_pdf
 from .pipeline import run
 from .report import write_csv
 from .settings_file import ConfigError, load_config
@@ -88,7 +89,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="only write the CSV (skip <output>_report.html and <output>_report.md)",
     )
+    p.add_argument(
+        "--pdf",
+        action="store_true",
+        help="also print the HTML report to <output>_report.pdf (needs Chrome, Chromium or Edge; see $COST_ANOMALY_BROWSER)",
+    )
     args = p.parse_args(argv)
+    if args.pdf and args.no_report:
+        p.error("--pdf needs the HTML report; drop --no-report")
     if not args.profile:
         p.error("--profile is required (or set AWS_PROFILE)")
     if not 1 <= args.eval_days <= MAX_EVAL_DAYS:
@@ -130,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
         if webhook and not args.alert_dry_run:
             validate_webhook(webhook)
         state = store.load()
-    except (ConfigError, AlertError, StateError) as e:
+        browser = find_browser() if args.pdf else None
+    except (ConfigError, AlertError, StateError, PdfError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     today = args.end_date or datetime.now(timezone.utc).date()
@@ -162,8 +171,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Report → {html_path}, {md_path}")
         location = html_path
 
+    # A PDF failure is reported after alerting, so it never suppresses an alert.
+    pdf_failed = False
+    if browser:
+        try:
+            write_pdf(html_path, pdf_path(args.output), browser)
+            print(f"PDF → {pdf_path(args.output)}")
+        except PdfError as e:
+            print(f"error: không tạo được PDF: {e}", file=sys.stderr)
+            pdf_failed = True
+    ok = 2 if pdf_failed else 0
+
     if not (args.state or webhook or args.alert_dry_run or args.fail_on_anomaly):
-        return 0
+        return ok
 
     def deliver(changes: list[Change]) -> None:
         payload = build_message(changes, args.profile, str(location))
@@ -186,13 +206,18 @@ def main(argv: list[str] | None = None) -> int:
     except AlertError as e:
         print(f"error: alert not delivered, will retry next run: {e}", file=sys.stderr)
         return 3
-    return 1 if args.fail_on_anomaly and changes else 0
+    return ok or (1 if args.fail_on_anomaly and changes else 0)
 
 
 def report_paths(output: Path) -> tuple[Path, Path]:
     """anomalies.csv → anomalies_report.html, anomalies_report.md (next to the CSV)."""
     stem = output.with_suffix("").name + "_report"
     return output.with_name(stem + ".html"), output.with_name(stem + ".md")
+
+
+def pdf_path(output: Path) -> Path:
+    """anomalies.csv → anomalies_report.pdf (next to the CSV)."""
+    return output.with_name(output.with_suffix("").name + "_report.pdf")
 
 
 if __name__ == "__main__":
