@@ -13,9 +13,11 @@ def test_request_shape():
     assert build_request(START, END) == {
         "TimePeriod": {"Start": "2026-09-30", "End": "2026-10-03"},
         "Granularity": "DAILY",
-        "Metrics": ["UnblendedCost"],
+        "Metrics": ["UnblendedCost", "NetAmortizedCost"],
         "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
-        "Filter": {"Dimensions": {"Key": "RECORD_TYPE", "Values": ["Usage"]}},
+        "Filter": {
+            "Dimensions": {"Key": "RECORD_TYPE", "Values": ["Usage", "SavingsPlanCoveredUsage", "DiscountedUsage"]}
+        },
     }
 
 

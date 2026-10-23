@@ -3,7 +3,10 @@ from pathlib import Path
 
 from .detect import Anomaly
 
-FIELDS = ["date", "service", "kind", "cost", "baseline_median", "mad", "robust_z", "delta"]
+FIELDS = [
+    "date", "service", "kind", "cost", "baseline_median", "mad", "robust_z", "delta",
+    "metric", "driver", "provisional",
+]
 
 
 def write_csv(anomalies: list[Anomaly], path: Path) -> None:
@@ -22,5 +25,8 @@ def write_csv(anomalies: list[Anomaly], path: Path) -> None:
                     "mad": f"{a.mad:.4f}",
                     "robust_z": "" if a.robust_z is None else f"{a.robust_z:.2f}",
                     "delta": f"{a.delta:.4f}",
+                    "metric": a.metric,
+                    "driver": a.driver,
+                    "provisional": "true" if a.provisional else "false",
                 }
             )

@@ -1,7 +1,7 @@
 import csv
 from datetime import date
 
-from cost_anomaly.detect import NEW_SERVICE, SPIKE, Anomaly
+from cost_anomaly.detect import AMORTIZED, NEW_SERVICE, RATE, SPIKE, Anomaly
 from cost_anomaly.report import FIELDS, write_csv
 
 
@@ -38,4 +38,21 @@ def test_rows_sorted_by_date_then_delta_desc(tmp_path):
         "mad": "1.0000",
         "robust_z": "13.49",
         "delta": "20.0000",
+        "metric": "usage",
+        "driver": "usage",
+        "provisional": "false",
     }
+
+
+def test_header_keeps_old_columns_first():
+    assert FIELDS == [
+        "date", "service", "kind", "cost", "baseline_median", "mad", "robust_z", "delta",
+        "metric", "driver", "provisional",
+    ]
+
+
+def test_rate_driven_provisional_row(tmp_path):
+    out = tmp_path / "a.csv"
+    write_csv([Anomaly(date(2026, 10, 14), "Fargate", SPIKE, 80, 52, 1, 18.9, 28, AMORTIZED, RATE, True)], out)
+    (row,) = read_rows(out)
+    assert (row["metric"], row["driver"], row["provisional"]) == ("amortized", "rate", "true")

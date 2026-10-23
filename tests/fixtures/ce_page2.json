@@ -4,8 +4,8 @@
       "TimePeriod": {"Start": "2026-10-01", "End": "2026-10-02"},
       "Total": {},
       "Groups": [
-        {"Keys": ["Amazon Elastic Compute Cloud - Compute"], "Metrics": {"UnblendedCost": {"Amount": "2.5", "Unit": "USD"}}},
-        {"Keys": ["Amazon Simple Storage Service"], "Metrics": {"UnblendedCost": {"Amount": "1.0", "Unit": "USD"}}}
+        {"Keys": ["Amazon Elastic Compute Cloud - Compute"], "Metrics": {"UnblendedCost": {"Amount": "2.5", "Unit": "USD"}, "NetAmortizedCost": {"Amount": "2.0", "Unit": "USD"}}},
+        {"Keys": ["Amazon Simple Storage Service"], "Metrics": {"UnblendedCost": {"Amount": "1.0", "Unit": "USD"}, "NetAmortizedCost": {"Amount": "1.0", "Unit": "USD"}}}
       ],
       "Estimated": false
     },
@@ -13,7 +13,7 @@
       "TimePeriod": {"Start": "2026-10-02", "End": "2026-10-03"},
       "Total": {},
       "Groups": [
-        {"Keys": ["Amazon Elastic Compute Cloud - Compute"], "Metrics": {"UnblendedCost": {"Amount": "11.0", "Unit": "USD"}}}
+        {"Keys": ["Amazon Elastic Compute Cloud - Compute"], "Metrics": {"UnblendedCost": {"Amount": "11.0", "Unit": "USD"}, "NetAmortizedCost": {"Amount": "8.8", "Unit": "USD"}}}
       ],
       "Estimated": true
     }

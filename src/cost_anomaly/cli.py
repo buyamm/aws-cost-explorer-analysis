@@ -9,14 +9,11 @@ from botocore.exceptions import BotoCoreError
 from .analysis import build_report
 from .auth import AuthError, assume_role_session
 from .config import Settings
-from .dates import compute_windows
-from .detect import detect
-from .fetch import CostExplorerError, TooManyPages, fetch_daily_costs
-from .guard import install_guard
+from .fetch import CostExplorerError, TooManyPages
 from .html_report import write_html
 from .md_report import write_markdown
+from .pipeline import run
 from .report import write_csv
-from .transform import to_matrix
 
 defaults = Settings()
 # Every evaluated day needs a full baseline inside the fetched lookback window.
@@ -48,6 +45,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="exclusive end of the fetch window, YYYY-MM-DD (default: today UTC)",
     )
     p.add_argument(
+        "--no-provisional",
+        action="store_true",
+        help="skip the 2 most recent days instead of evaluating them as provisional (not settled in Cost Explorer)",
+    )
+    p.add_argument(
         "--no-report",
         action="store_true",
         help="only write the CSV (skip <output>_report.html and <output>_report.md)",
@@ -69,26 +71,25 @@ def main(argv: list[str] | None = None) -> int:
         min_history=args.min_history,
         eval_days=args.eval_days,
         max_pages=args.max_pages,
+        include_provisional=not args.no_provisional,
     )
     today = args.end_date or datetime.now(timezone.utc).date()
-    windows = compute_windows(today, settings)
 
     try:
         session = assume_role_session(args.profile)
-        client = install_guard(session.client("ce", region_name="us-east-1"))
-        results = fetch_daily_costs(client, windows.fetch_start, windows.fetch_end, settings.max_pages)
+        result = run(session, settings, today)
     except (AuthError, BotoCoreError, CostExplorerError, TooManyPages) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    matrix = to_matrix(results, windows.fetch_start, windows.fetch_end)
-    anomalies = detect(matrix, windows.eval_days, settings)
+    anomalies = result.anomalies
     write_csv(anomalies, args.output)
     print(f"Found {len(anomalies)} anomalies → {args.output}")
 
     if not args.no_report:
         html_path, md_path = report_paths(args.output)
-        report = build_report(matrix, windows, settings, anomalies, args.profile, datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        report = build_report(result.usage, result.windows, settings, anomalies, args.profile, now, result.amortized)
         write_html(report, html_path)
         write_markdown(report, md_path)
         print(f"Report → {html_path}, {md_path}")

@@ -1,7 +1,7 @@
 from datetime import date
 
 from conftest import load_fixture
-from cost_anomaly.transform import to_matrix
+from cost_anomaly.transform import AMORTIZED_METRIC, to_matrix
 
 START, END = date(2026, 9, 30), date(2026, 10, 3)
 EC2 = "Amazon Elastic Compute Cloud - Compute"
@@ -28,3 +28,20 @@ def test_new_service_backfilled_with_zero():
     m = to_matrix(load_fixture("ce_new_service.json")["ResultsByTime"], START, END)
     assert m["Amazon Bedrock"] == {date(2026, 9, 30): 0.0, date(2026, 10, 1): 0.0, date(2026, 10, 2): 42.0}
     assert m["AWS Lambda"][date(2026, 10, 1)] == 0.0
+
+
+def test_amortized_metric_summed_across_pages():
+    m = to_matrix(paged_results(), START, END, metric=AMORTIZED_METRIC)
+    assert m[EC2][date(2026, 10, 1)] == 10.0  # 8.0 + 2.0: EC2 is partly Savings Plan covered
+    assert m[S3][date(2026, 10, 1)] == 1.0
+
+
+def test_group_without_the_metric_counts_as_zero():
+    results = [
+        {
+            "TimePeriod": {"Start": "2026-09-30", "End": "2026-10-01"},
+            "Groups": [{"Keys": ["AWS Lambda"], "Metrics": {"UnblendedCost": {"Amount": "3.0", "Unit": "USD"}}}],
+        }
+    ]
+    m = to_matrix(results, START, END, metric=AMORTIZED_METRIC)
+    assert m["AWS Lambda"][date(2026, 9, 30)] == 0.0

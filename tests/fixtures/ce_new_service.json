@@ -4,7 +4,7 @@
       "TimePeriod": {"Start": "2026-09-30", "End": "2026-10-01"},
       "Total": {},
       "Groups": [
-        {"Keys": ["AWS Lambda"], "Metrics": {"UnblendedCost": {"Amount": "3.0", "Unit": "USD"}}}
+        {"Keys": ["AWS Lambda"], "Metrics": {"UnblendedCost": {"Amount": "3.0", "Unit": "USD"}, "NetAmortizedCost": {"Amount": "3.0", "Unit": "USD"}}}
       ],
       "Estimated": false
     },
@@ -18,8 +18,8 @@
       "TimePeriod": {"Start": "2026-10-02", "End": "2026-10-03"},
       "Total": {},
       "Groups": [
-        {"Keys": ["AWS Lambda"], "Metrics": {"UnblendedCost": {"Amount": "3.0", "Unit": "USD"}}},
-        {"Keys": ["Amazon Bedrock"], "Metrics": {"UnblendedCost": {"Amount": "42.0", "Unit": "USD"}}}
+        {"Keys": ["AWS Lambda"], "Metrics": {"UnblendedCost": {"Amount": "3.0", "Unit": "USD"}, "NetAmortizedCost": {"Amount": "3.0", "Unit": "USD"}}},
+        {"Keys": ["Amazon Bedrock"], "Metrics": {"UnblendedCost": {"Amount": "42.0", "Unit": "USD"}, "NetAmortizedCost": {"Amount": "42.0", "Unit": "USD"}}}
       ],
       "Estimated": false
     }
