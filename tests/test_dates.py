@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from cost_anomaly.config import Settings
-from cost_anomaly.dates import baseline_days, compute_windows, date_range
+from cost_anomaly.dates import baseline_days, compute_windows, date_range, days_left_in_month
 
 TODAY = date(2026, 10, 15)
 
@@ -42,3 +42,10 @@ def test_baseline_of_oldest_eval_day_fits_in_fetch_window():
 def test_rejects_lookback_too_short_for_baseline():
     with pytest.raises(ValueError):
         compute_windows(TODAY, Settings(lookback_days=30))
+
+
+@pytest.mark.parametrize(
+    "day, left", [(date(2026, 10, 12), 20), (date(2026, 10, 31), 1), (date(2027, 2, 28), 1), (date(2028, 2, 1), 29)]
+)
+def test_days_left_in_month_inclusive(day, left):
+    assert days_left_in_month(day) == left

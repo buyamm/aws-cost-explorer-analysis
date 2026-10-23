@@ -155,3 +155,55 @@ def test_spike_yesterday_is_reported_as_provisional(tmp_path, fake_session, ce_c
 
 def test_no_provisional_restores_settled_window(tmp_path, fake_session, ce_client):
     assert run_rows(tmp_path, ce_client, "--no-provisional") == [("2026-10-12", "SPIKE", "false")]
+
+
+def run_with_config(tmp_path, ce_client, config_text, *extra):
+    cfg = tmp_path / "cost-anomaly.toml"
+    cfg.write_text(config_text)
+    out = tmp_path / "anomalies.csv"
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", build_response())
+        code = cli.main(
+            ["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--no-report", "--config", str(cfg), *extra]
+        )
+    assert code == 0
+    with open(out, newline="") as f:
+        return [(r["date"], r["service"]) for r in csv.DictReader(f)]
+
+
+def test_config_per_service_override_applies(tmp_path, fake_session, ce_client):
+    rows = run_with_config(tmp_path, ce_client, '[services."Amazon EC2"]\nmin_delta = 100\n')
+    assert rows == [("2026-10-10", "Amazon Bedrock")]
+
+
+def test_explicit_flag_beats_config_defaults(tmp_path, fake_session, ce_client):
+    assert run_with_config(tmp_path, ce_client, "[defaults]\nk = 1000\nnew_threshold = 1000\n") == []
+    rows = run_with_config(tmp_path, ce_client, "[defaults]\nk = 1000\n", "--k", "3.5")
+    assert ("2026-10-12", "Amazon EC2") in rows
+
+
+def test_bad_config_exits_2_before_auth(tmp_path, monkeypatch, capsys):
+    cfg = tmp_path / "bad.toml"
+    cfg.write_text("foo = 1\n")
+
+    def no_auth(profile):
+        raise AssertionError("must not authenticate with a bad config")
+
+    monkeypatch.setattr(cli, "assume_role_session", no_auth)
+    assert cli.main(["--profile", "p", "--config", str(cfg), "--output", str(tmp_path / "a.csv")]) == 2
+    assert "foo" in capsys.readouterr().err
+    assert not (tmp_path / "a.csv").exists()
+
+
+def test_no_drop_flag_disables_drops(tmp_path, fake_session, ce_client):
+    days = date_range(WINDOWS.fetch_start, WINDOWS.fetch_end)
+    backup = {d: 40.0 for d in days}
+    backup[date(2026, 10, 12)] = 0.0
+    response = {"ResultsByTime": results_from_matrix({"AWS Backup": backup}), "DimensionValueAttributes": []}
+    out = tmp_path / "a.csv"
+    for extra, expected in (([], 1), (["--no-drop"], 0)):
+        with Stubber(ce_client) as stub:
+            stub.add_response("get_cost_and_usage", response)
+            assert cli.main(["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--no-report", *extra]) == 0
+        with open(out, newline="") as f:
+            assert len(list(csv.DictReader(f))) == expected

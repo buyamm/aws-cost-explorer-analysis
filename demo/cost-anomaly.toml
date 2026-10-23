@@ -1,0 +1,10 @@
+# Demo config for cost-anomaly (--config demo/cost-anomaly.toml)
+
+# Bedrock rollout is planned: still reported, tagged "đã biết"
+known = ["Amazon Bedrock"]
+
+[services."Amazon Relational Database Service"]
+min_delta = 5  # steady database: +$5/day already matters
+
+[services."Amazon Bedrock"]
+new_threshold = 40  # ignore the first small test days

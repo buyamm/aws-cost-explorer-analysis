@@ -193,3 +193,81 @@ def test_insight_without_provisional_keeps_skipped_note():
 def test_params_list_include_provisional_flag():
     params = {p.name: p for p in provisional_report().params}
     assert params["include_provisional"].flag == "--no-provisional"
+
+
+OVERRIDDEN = Settings(
+    service_overrides={"Lambda": {"min_delta": 3}, "RDS": {"min_delta": 5}},
+    ignore=frozenset({"Tax"}),
+    known=frozenset({"EC2"}),
+)
+
+
+def overridden_report(matrix):
+    anomalies = detect(matrix, WINDOWS.eval_days, OVERRIDDEN)
+    return build_report(matrix, WINDOWS, OVERRIDDEN, anomalies, "demo", GENERATED)
+
+
+def test_explanation_uses_the_services_own_min_delta():
+    r = overridden_report({"RDS": series([179, 180, 181], {date(2026, 10, 12): 187})})
+    assert "min_delta $5.00" in r.rows[0].explanation
+
+
+def test_near_misses_use_service_thresholds_and_skip_ignored():
+    r = overridden_report({**MATRIX, "Tax": series([0.9, 1.0, 1.1], {date(2026, 10, 8): 6.0})})
+    assert ("Lambda", date(2026, 10, 8)) in {(x.anomaly.service, x.anomaly.date) for x in r.rows}
+    assert r.near_misses == []
+
+
+def test_known_service_is_labelled():
+    r = overridden_report(MATRIX)
+    assert all("đã biết" in x.labels for x in r.rows if x.anomaly.service == "EC2")
+
+
+def test_params_list_service_overrides():
+    names = {p.name: p for p in overridden_report(MATRIX).params}
+    assert names["RDS · min_delta"].value == "$5.00"
+    assert names["RDS · min_delta"].flag == "--config"
+
+
+DROP_MATRIX = {
+    "Backup": series([39, 40, 41], {date(2026, 10, 11): 0.0, date(2026, 10, 12): 0.0}),
+    "EC2": series([98, 100, 102], {date(2026, 10, 9): 300}),
+}
+
+
+def test_drop_rows_are_explained_and_excluded_from_excess():
+    r = report_for(DROP_MATRIX)
+    drop = next(x for x in r.rows if x.anomaly.service == "Backup")
+    assert "giảm" in drop.explanation and "drop_ratio" in drop.explanation
+    assert r.excess == 200 and r.drop_count == 2
+
+
+def test_drop_insight_and_next_step():
+    r = report_for(DROP_MATRIX)
+    text = "\n".join(r.insights)
+    assert "Backup: chi phí rơi về gần 0" in text
+    assert any("backup" in s.lower() for s in r.next_steps)
+
+
+def test_drop_near_miss():
+    s = score(series([98, 100, 102], {date(2026, 10, 12): 20}), date(2026, 10, 12), SETTINGS)
+    assert "giảm" in near_miss(s, SETTINGS).lower()
+
+
+def test_html_and_markdown_render_drop():
+    r = report_for(DROP_MATRIX)
+    html = render_html(r)
+    assert "mk drop" in html and "DROP" in html and "1 DROP" not in html
+    assert "2 DROP" in render_markdown(r)
+
+
+def test_ongoing_rollup_states_month_impact():
+    r = report_for({"EC2": series([98, 100, 102], {date(2026, 10, 12): 130})})
+    text = "\n".join(r.insights)
+    assert "nếu tiếp diễn" in text.lower() and "$600.00" in text
+
+
+def test_tables_show_month_impact():
+    r = report_for({"EC2": series([98, 100, 102], {date(2026, 10, 12): 130})})
+    assert "Tác động tháng" in render_html(r) and "$600.00" in render_html(r)
+    assert "Tác động tháng" in render_markdown(r)

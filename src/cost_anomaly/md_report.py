@@ -27,7 +27,7 @@ def render_markdown(report: Report) -> str:
         "",
         "## Tổng quan",
         "",
-        f"- Bất thường: **{len(report.rows)}** ({report.spike_count} SPIKE, {report.new_count} NEW_SERVICE) ở {len(report.rollups)} service",
+        f"- Bất thường: **{len(report.rows)}** ({report.kind_summary}) ở {len(report.rollups)} service",
         f"- Phần vượt mức bình thường: **{usd(report.excess)}**",
         f"- Chi phí khung đánh giá: {usd(report.eval_spend)}",
         "",
@@ -42,7 +42,7 @@ def render_markdown(report: Report) -> str:
     out += ["## Bảng bất thường", ""]
     if report.rows:
         out += table(
-            ["Ngày", "Service", "Loại", "Chi phí", "Median", "MAD", "z", "Delta", "Mức", "Giải thích"],
+            ["Ngày", "Service", "Loại", "Chi phí", "Median", "MAD", "z", "Delta", "Tác động tháng", "Mức", "Giải thích"],
             [
                 [
                     r.anomaly.date.isoformat(),
@@ -53,6 +53,7 @@ def render_markdown(report: Report) -> str:
                     usd(r.anomaly.mad),
                     "—" if r.anomaly.robust_z is None else f"{r.anomaly.robust_z:.2f}",
                     usd(r.anomaly.delta),
+                    usd(r.anomaly.month_impact),
                     r.severity,
                     r.explanation,
                 ]

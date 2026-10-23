@@ -54,13 +54,14 @@ def simulate_costs(days: list[date], windows, seed: int = 7) -> tuple[Matrix, Ma
     m = {
         "Amazon Elastic Compute Cloud - Compute": series(320, 0.03, weekend=0.85),
         "EC2 - Other": series(25, 0.05),
-        "Amazon Relational Database Service": series(180, 0.01),
+        "Amazon Relational Database Service": series(180, 0.005),
         "Amazon Simple Storage Service": series(40, 0.02, trend=0.17),
         "AWS Lambda": series(5, 0.08),
         "AmazonCloudWatch": series(12, 0.04),
         "Amazon Bedrock": {d: 0.0 for d in days},
         "AWS Fargate": series(80, 0.01),
         "Amazon ElastiCache": {d: 0.0 for d in days},
+        "AWS Backup": series(40, 0.02),
     }
 
     # 1. EC2 compute spike (someone launched a fleet of large on-demand instances for a day)
@@ -75,7 +76,12 @@ def simulate_costs(days: list[date], windows, seed: int = 7) -> tuple[Matrix, Ma
         m["Amazon Bedrock"][d] = round(30 + 8 * i + rng.uniform(-2, 2), 4)
     # 4. Lambda doubles, but +$7 stays under --min-delta → filtered as noise
     m["AWS Lambda"][e[2]] = 12.0
-    # 5. CloudWatch log ingestion explodes yesterday: provisional data
+    # 5. RDS +$7 for a day: only reported because the config sets min_delta = 5 for RDS
+    m["Amazon Relational Database Service"][e[1]] += 7.0
+    # 6. Backup jobs stop: AWS Backup falls to $0 from e[5] and stays there → DROP
+    for d in e[5:] + p:
+        m["AWS Backup"][d] = 0.0
+    # 7. CloudWatch log ingestion explodes yesterday: provisional data
     m["AmazonCloudWatch"][p[-1]] = 64.0
 
     # What was actually paid. Uncovered services pay the usage cost.
@@ -84,9 +90,9 @@ def simulate_costs(days: list[date], windows, seed: int = 7) -> tuple[Matrix, Ma
     # the extra fleet on e[5] is on-demand, so it adds the same dollars to both measures.
     paid[ec2] = {d: round(v * 0.9, 4) for d, v in m[ec2].items()}
     paid[ec2][e[5]] = round(normal_ec2 * 0.9 + 540.0 - normal_ec2, 4)
-    # 6. Fargate Savings Plan expires: usage flat, paid goes from 65% of on-demand to 100%
+    # 8. Fargate Savings Plan expires: usage flat, paid goes from 65% of on-demand to 100%
     paid["AWS Fargate"] = {d: round(v * (1.0 if d >= e[2] else 0.65), 4) for d, v in m["AWS Fargate"].items()}
-    # 7. ElastiCache fully covered by a Reserved Instance (usage measure $0, RI cost $60/day) until it expires
+    # 9. ElastiCache fully covered by a Reserved Instance (usage measure $0, RI cost $60/day) until it expires
     for d in days:
         expired = d >= e[4]
         m["Amazon ElastiCache"][d] = round(95.0 * (1 + rng.gauss(0, 0.01)), 4) if expired else 0.0
@@ -231,15 +237,16 @@ def print_anomalies(path: Path):
         rows = list(csv.DictReader(f))
     header(f"Anomalies ({len(rows)}) — from {path}")
     print(
-        f"  {'date':<11}{'kind':<13}{'service':<40}{'cost':>9}{'median':>9}{'delta':>9}{'z':>8}"
-        f"  {'metric':<10}{'driver':<7}provisional"
+        f"  {'date':<11}{'kind':<13}{'service':<40}{'cost':>9}{'median':>9}{'delta':>9}{'z':>8}{'month':>10}"
+        f"  {'metric':<10}{'driver':<7}{'prov.':<6}known"
     )
     for r in rows:
-        color = "\033[31m" if r["kind"] == "SPIKE" else "\033[33m"
+        color = {"SPIKE": "\033[31m", "DROP": "\033[35m"}.get(r["kind"], "\033[33m")
         print(
             f"  {r['date']:<11}{color}{r['kind']:<13}\033[0m{r['service'][:39]:<40}"
             f"{float(r['cost']):>9.2f}{float(r['baseline_median']):>9.2f}{float(r['delta']):>9.2f}"
-            f"{r['robust_z'] or '—':>8}  {r['metric']:<10}{r['driver']:<7}{r['provisional']}"
+            f"{r['robust_z'] or '—':>8}{float(r['month_impact']):>10.2f}  {r['metric']:<10}{r['driver']:<7}"
+            f"{r['provisional']:<6}{r['known']}"
         )
 
 
@@ -252,7 +259,10 @@ SCENARIOS = """\
   • Fargate Savings Plan expires, usage flat → expect amortized SPIKE, driver=rate (not a usage spike)
   • ElastiCache RI expires ($0 usage → $95) → expect SPIKE, driver=rate (not NEW_SERVICE)
   • CloudWatch $12 → $64 yesterday (T−1)    → expect SPIKE, provisional=true
-  • RDS steady                              → no alert"""
+  • RDS +$7 for a day (config min_delta = 5) → expect SPIKE (Lambda's +$7 stays filtered)
+  • AWS Backup $40 → $0 from day 6, ongoing → expect DROP, negative month_impact
+  • Bedrock is listed as known               → its rows have known=true
+  (config: demo/cost-anomaly.toml)"""
 
 
 def main() -> int:
@@ -288,8 +298,10 @@ def main() -> int:
     print_matrix_summary(paid, windows.eval_days, "Simulated amortized (actually paid) cost (USD)")
 
     stubs = install_fake_aws(to_results(matrix, paid, days), windows.fetch_start, windows.fetch_end)
-    header(f"Running: cost-anomaly --profile {PROFILE} --end-date {args.end_date} --output {args.output}")
-    code = cli.main(["--profile", PROFILE, "--end-date", args.end_date.isoformat(), "--output", str(args.output)])
+    config = Path(__file__).parent / "cost-anomaly.toml"
+    argv = ["--profile", PROFILE, "--end-date", args.end_date.isoformat(), "--output", str(args.output), "--config", str(config)]
+    header("Running: cost-anomaly " + " ".join(argv))
+    code = cli.main(argv)
     for s in stubs:
         s.assert_no_pending_responses()
     if code != 0:

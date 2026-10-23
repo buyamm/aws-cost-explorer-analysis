@@ -5,7 +5,7 @@ from .detect import Anomaly
 
 FIELDS = [
     "date", "service", "kind", "cost", "baseline_median", "mad", "robust_z", "delta",
-    "metric", "driver", "provisional",
+    "metric", "driver", "provisional", "month_impact", "known",
 ]
 
 
@@ -28,5 +28,7 @@ def write_csv(anomalies: list[Anomaly], path: Path) -> None:
                     "metric": a.metric,
                     "driver": a.driver,
                     "provisional": "true" if a.provisional else "false",
+                    "month_impact": f"{a.month_impact:.4f}",
+                    "known": "true" if a.known else "false",
                 }
             )
