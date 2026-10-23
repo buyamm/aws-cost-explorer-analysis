@@ -14,12 +14,14 @@ uv run pytest -q                               # all tests
 uv run pytest tests/test_detect.py -q          # one file
 uv run pytest tests/test_cli.py::test_end_to_end_writes_csv -q   # one test
 uv run python demo/run_demo.py --end-date 2026-10-15             # offline end-to-end demo
+terraform -chdir=infra/terraform init -backend=false && terraform -chdir=infra/terraform test   # Terraform unit tests (mocked, no credentials)
 ```
 
 No linter/formatter is configured.
 
 ## Safety constraints (enforced in `.claude/settings.json`)
 
+- Never run `terraform apply`/`destroy`/`plan` against real AWS (also denied in settings). Terraform is checked with `terraform -chdir=infra/terraform fmt -check -recursive`, `validate` and `test` only; tests use `mock_provider "aws"` in plan mode.
 - Never run the real CLI (`cost-anomaly`, `uv run cost-anomaly`, `python -m cost_anomaly`, `run.py`) or the `aws` CLI: they need MFA and each Cost Explorer request costs $0.01. The user's shell exports `AWS_PROFILE` (aws-vault `credential_process`), so even an argument-less run starts real auth; to check `run.py`/CLI behavior use `--help` only, or unset `AWS_PROFILE` and point `AWS_CONFIG_FILE` at a temp file. Use the test suite or `demo/run_demo.py` to exercise the pipeline.
 - Don't read `~/.aws/**`, `.env*`, top-level `*.csv` (e.g. `anomalies.csv` holds real account cost data), or the `*_report.html`/`*_report.md` written next to them (same data).
 - Tests must never touch Slack: `conftest.py` deletes `COST_ANOMALY_SLACK_WEBHOOK`; CLI tests monkeypatch `urllib.request.urlopen`.
@@ -47,6 +49,8 @@ No linter/formatter is configured.
 - All report prose is Vietnamese, matching the README.
 
 **AWS CAD (`cad.py`, `--with-cad`)** — `pipeline.run(..., with_cad=True)` calls `GetAnomalies` for `[first eval day, last eval day]` after the cost fetch, parses root-cause services (fallback `DimensionValue`; open anomalies have `end=None`) and sets `Anomaly.cad_match` via `cad.match`. CAD errors never fail the run: they land in `RunResult.cad_error`, the CLI warns, the report shows "không lấy được". `cad_match` is `None` (empty in CSV) whenever CAD wasn't checked. Report section "Đối chiếu AWS CAD" uses `Report.cad_both/cad_tool_only/cad_only`; incidents carry `cad_match` (optional key in state JSON).
+
+**Scheduled run (`lambda_handler.py`, `infra/terraform/`)** — `handler` → `run_scheduled(env, session, now)` with the execution role's credentials (no AssumeRole/MFA, so no session policy: least privilege is the role's own ARN-scoped inline policy, built with `jsonencode` in `locals.tf` so mocked-provider tests can decode it). Order: config from `COST_ANOMALY_CONFIG` (TOML text, `settings_file.parse_config`) → webhook from SSM (`SLACK_WEBHOOK_PARAMETER`, validated) → `S3StateStore.load()` → `pipeline.run` → CSV/HTML/MD to `s3://STATE_BUCKET/REPORT_PREFIX<date>/` → `alerting.process(..., state=preloaded)`. Clients are guarded: S3 {GetObject, PutObject}, SSM {GetParameter}, CE as in the CLI. Terraform disables Scheduler and async-invoke retries (each retry re-bills CE) and sets reserved concurrency 1. Terraform never touches the webhook value.
 
 **Incidents and alerts (`state.py`, `alerting.py`, `alert.py`)** — `state.merge` folds anomalies into incidents keyed by (service, kind), merging runs of consecutive days that touch an existing incident; it prunes incidents ending before `fetch_start` and returns `Change(incident, "new"|"worse")` (worse = |peak| ≥ 1.5 × last alerted and +≥ service `min_delta`; `known` never changes). `alerting.process(anomalies, settings, fetch_start, store, deliver, now, save)` loads → merges → calls `deliver(changes)` → `mark_alerted` → saves; if `deliver` raises `AlertError` nothing is saved, so the alert is retried next run. Stores implement `load()/save()`: `LocalFileStore` (atomic write, versioned JSON via `state.dumps/loads`) and the CLI's `MemoryStore` when there is no `--state`. `alert.send` posts to the webhook with stdlib `urllib` (timeout 10 s, 3 attempts, retry on network/429/5xx), validates the host is `hooks.slack.com`, and never puts the URL in messages; it looks up `urllib.request.urlopen`/`time.sleep` at call time so tests can replace them. `build_message` escapes `& < >` in service names (untrusted).
 

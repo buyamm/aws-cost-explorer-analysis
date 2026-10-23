@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, replace
 from datetime import date, timedelta
 from pathlib import Path
 
+from botocore.exceptions import ClientError
+
 from .config import Settings
 from .dates import runs_of
 from .detect import Anomaly
@@ -171,3 +173,26 @@ class LocalFileStore:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(dumps(state), encoding="utf-8")
         tmp.replace(self.path)  # atomic: a crash never leaves half a state file
+
+
+class S3StateStore:
+    """Same JSON document in S3 (scheduled runs). Needs only s3:GetObject and s3:PutObject on the key."""
+
+    def __init__(self, client, bucket: str, key: str):
+        self.client, self.bucket, self.key = client, bucket, key
+        self.uri = f"s3://{bucket}/{key}"
+
+    def load(self) -> State:
+        try:
+            body = self.client.get_object(Bucket=self.bucket, Key=self.key)["Body"].read()
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404"):
+                return State()
+            raise StateError(f"cannot read {self.uri} ({code})") from e
+        return loads(body.decode("utf-8"), self.uri)
+
+    def save(self, state: State) -> None:
+        self.client.put_object(
+            Bucket=self.bucket, Key=self.key, Body=dumps(state).encode("utf-8"), ContentType="application/json"
+        )

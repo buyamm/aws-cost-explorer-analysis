@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         settings = build_settings(args)
         if webhook and not args.alert_dry_run:
             validate_webhook(webhook)
-        store.load()
+        state = store.load()
     except (ConfigError, AlertError, StateError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -180,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         changes = process(
-            anomalies, settings, result.windows.fetch_start, store, deliver, now.isoformat(), save=not args.alert_dry_run
+            anomalies, settings, result.windows.fetch_start, store, deliver, now.isoformat(),
+            save=not args.alert_dry_run, state=state,
         )
     except AlertError as e:
         print(f"error: alert not delivered, will retry next run: {e}", file=sys.stderr)

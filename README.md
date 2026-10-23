@@ -238,7 +238,7 @@ Mỗi lần chạy có sự cố mới/xấu đi sẽ gửi đúng một tin nh�
 
 Không đặt webhook thì danh sách sự cố mới được in ra màn hình. Kết hợp `--fail-on-anomaly` để CI hoặc cron báo lỗi khi có điều mới.
 
-Lưu ý: chạy tay vẫn cần nhập MFA. Để chạy tự động hằng ngày không cần người, xem phần triển khai Lambda (spec 005).
+Lưu ý: chạy tay vẫn cần nhập MFA. Để chạy tự động hằng ngày không cần người, xem [Chạy tự động trên AWS Lambda](#chạy-tự-động-trên-aws-lambda).
 
 ## Đối chiếu với AWS CAD
 
@@ -250,6 +250,49 @@ AWS Cost Anomaly Detection (CAD) miễn phí và dùng mô hình ML, nhưng là 
 - Cần bật CAD trong account (có monitor) và role phải có quyền `ce:GetAnomalies`. Nếu không lấy được, tool in cảnh báo rồi chạy tiếp như bình thường.
 
 Lưu ý chi phí: tài liệu AWS không nói rõ `GetAnomalies` có bị tính $0.01/request như `GetCostAndUsage` hay không (thường chỉ 1 request mỗi lần chạy). Cách kiểm tra: chạy thử một lần rồi xem dòng Cost Explorer API trong Bills hôm sau. Vì vậy tính năng này mặc định tắt.
+
+## Chạy tự động trên AWS Lambda
+
+`infra/terraform/` triển khai tool vào chính account cần theo dõi: một Lambda chạy hằng ngày bằng EventBridge Scheduler (mặc định 02:00 UTC = 09:00 giờ Việt Nam). Lambda dùng quyền của execution role nên không cần MFA. Lambda lưu state và report vào S3, đọc webhook Slack từ SSM SecureString.
+
+Thành phần:
+
+| Tài nguyên | Ghi chú |
+|---|---|
+| Lambda `cost-anomaly` (python3.12) | Code đóng gói từ `src/`, boto3 có sẵn trong runtime. Chỉ chạy 1 lần tại một thời điểm, không tự retry |
+| IAM role của Lambda | Chỉ `ce:GetCostAndUsage` (+`ce:GetAnomalies` nếu `with_cad`), `s3:GetObject`/`PutObject` trên `state/incidents.json` và `reports/*`, `ssm:GetParameter` trên đúng parameter webhook, ghi log vào log group của nó. Trong code, mọi client vẫn có allowlist API |
+| S3 bucket `cost-anomaly-<account>-<region>` | Chặn public, bắt buộc TLS, mã hóa, versioning; report hết hạn sau 90 ngày |
+| EventBridge Scheduler | Không retry, vì mỗi lần chạy lại tốn thêm request Cost Explorer. Ngày lỗi sẽ được lần chạy hôm sau bù lại |
+| CloudWatch Logs | Giữ 30 ngày |
+
+Các bước (tự chạy, cần quyền tạo tài nguyên trong account):
+
+```sh
+# 1. Lưu webhook vào SSM (Terraform không bao giờ giữ giá trị này, nên nó không nằm trong state)
+aws ssm put-parameter --name /cost-anomaly/slack-webhook --type SecureString \
+  --value 'https://hooks.slack.com/services/...'
+
+# 2. Triển khai
+cd infra/terraform
+terraform init
+terraform apply -var 'slack_webhook_parameter_name=/cost-anomaly/slack-webhook'
+#   tùy chọn: -var with_cad=true   -var account_label=project-a
+#             -var "config_toml=$(cat ../../demo/cost-anomaly.toml)"
+
+# 3. Chạy thử một lần (không cần đợi lịch)
+aws lambda invoke --function-name cost-anomaly out.json && cat out.json
+```
+
+Kết quả mỗi lần chạy: report ở `s3://<bucket>/reports/<ngày>/` và tin nhắn Slack nếu có sự cố mới/xấu đi. Bản tóm tắt nằm trong CloudWatch Logs. Khi gửi Slack thất bại, lần chạy báo lỗi trên CloudWatch và state không bị ghi, nên hôm sau cảnh báo sẽ được gửi lại.
+
+Chi phí ước tính mỗi tháng: khoảng 30–60 request Cost Explorer (≈ $0.30–0.60; thêm khoảng 30 request nếu bật `with_cad` và AWS có tính phí API này). Lambda, Scheduler, S3 và SSM standard parameter nằm trong free tier hoặc chỉ vài cent.
+
+Kiểm tra cấu hình mà không cần credential (mock provider, chỉ plan):
+
+```sh
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform test
+```
 
 ## Cách phát hiện
 

@@ -1,10 +1,14 @@
+import io
 from datetime import date, timedelta
 
+import boto3
 import pytest
+from botocore.response import StreamingBody
+from botocore.stub import Stubber
 
 from cost_anomaly.config import Settings
 from cost_anomaly.detect import DROP, NEW_SERVICE, SPIKE, Anomaly
-from cost_anomaly.state import NEW, WORSE, LocalFileStore, State, StateError, mark_alerted, merge
+from cost_anomaly.state import NEW, WORSE, LocalFileStore, S3StateStore, State, StateError, dumps, mark_alerted, merge
 
 FETCH_START = date(2026, 7, 17)
 SETTINGS = Settings()
@@ -131,3 +135,42 @@ def test_state_without_cad_field_still_loads(tmp_path):
         '"known": false, "last_alerted_peak": 50, "alerted_at": "2026-10-12T08:00:00+00:00"}]}'
     )
     assert LocalFileStore(path).load().incidents[0].cad_match is False
+
+
+def s3_body(text: str):
+    data = text.encode()
+    return StreamingBody(io.BytesIO(data), len(data))
+
+
+@pytest.fixture
+def s3_client():
+    return boto3.client("s3", region_name="us-east-1")
+
+
+def test_s3_store_missing_object_is_empty(s3_client):
+    with Stubber(s3_client) as stub:
+        stub.add_client_error("get_object", service_error_code="NoSuchKey", http_status_code=404)
+        assert S3StateStore(s3_client, "bucket", "state/incidents.json").load() == State()
+
+
+def test_s3_store_round_trip(s3_client):
+    state = alerted(State(), [anomaly(11)])
+    key = {"Bucket": "bucket", "Key": "state/incidents.json"}
+    with Stubber(s3_client) as stub:
+        stub.add_response("put_object", {}, {**key, "Body": dumps(state).encode(), "ContentType": "application/json"})
+        stub.add_response("get_object", {"Body": s3_body(dumps(state))}, key)
+        store = S3StateStore(s3_client, "bucket", "state/incidents.json")
+        store.save(state)
+        assert store.load() == state
+        stub.assert_no_pending_responses()
+
+
+def test_s3_store_errors_name_the_object(s3_client):
+    with Stubber(s3_client) as stub:
+        stub.add_response("get_object", {"Body": s3_body("{oops")})
+        stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403)
+        store = S3StateStore(s3_client, "bucket", "state/incidents.json")
+        with pytest.raises(StateError, match="s3://bucket/state/incidents.json"):
+            store.load()
+        with pytest.raises(StateError, match="AccessDenied"):
+            store.load()

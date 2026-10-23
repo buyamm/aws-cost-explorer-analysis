@@ -1,7 +1,7 @@
 import pytest
 
 from cost_anomaly.config import Settings
-from cost_anomaly.settings_file import ConfigError, load_config
+from cost_anomaly.settings_file import ConfigError, load_config, parse_config
 
 
 def write(tmp_path, text: str):
@@ -61,3 +61,10 @@ def test_invalid_config_is_rejected(tmp_path, text, message):
 def test_missing_file_is_rejected(tmp_path):
     with pytest.raises(ConfigError, match="missing.toml"):
         load_config(tmp_path / "missing.toml", Settings())
+
+
+def test_parse_config_from_text_names_the_source():
+    s = parse_config('[services."RDS"]\nmin_delta = 5\n', Settings(), "COST_ANOMALY_CONFIG")
+    assert s.service_overrides == {"RDS": {"min_delta": 5}}
+    with pytest.raises(ConfigError, match="COST_ANOMALY_CONFIG"):
+        parse_config("k = [", Settings(), "COST_ANOMALY_CONFIG")
