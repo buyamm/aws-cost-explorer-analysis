@@ -18,7 +18,11 @@
       "Edit(~/.aws/**)",
       "Read(./.env)",
       "Read(./.env.*)",
-      "Read(./*.csv)"
+      "Read(./*.csv)",
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(terraform -chdir=infra/terraform apply:*)",
+      "Bash(terraform -chdir=infra/terraform destroy:*)"
     ],
     "ask": [
       "Bash(uv add:*)",

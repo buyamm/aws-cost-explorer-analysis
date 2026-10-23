@@ -49,3 +49,13 @@ def test_save_false_never_writes(tmp_path):
     store = LocalFileStore(tmp_path / "s.json")
     process(SPIKES, Settings(), FETCH_START, store, Recorder(), NOW, save=False)
     assert not (tmp_path / "s.json").exists()
+
+
+def test_preloaded_state_skips_loading():
+    class NoLoad(LocalFileStore):
+        def load(self):
+            raise AssertionError("state was already loaded")
+
+    store = NoLoad("/nonexistent/never-written.json")
+    changes = process(SPIKES, Settings(), FETCH_START, store, Recorder(), NOW, save=False, state=State())
+    assert [c.reason for c in changes] == [NEW]

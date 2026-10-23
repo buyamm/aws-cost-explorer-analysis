@@ -18,12 +18,25 @@ class ConfigError(ValueError):
 
 def load_config(path: Path, base: Settings) -> Settings:
     try:
-        data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
     except OSError as e:
         raise ConfigError(f"cannot read config {path}: {e.strerror}") from e
-    except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"invalid TOML in {path}: {e}") from e
+    return parse_config(text, base, str(path))
 
+
+def parse_config(text: str, base: Settings, source: str) -> Settings:
+    """`source` (file path or variable name) appears in error messages."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"invalid TOML in {source}: {e}") from e
+    try:
+        return _apply(data, base)
+    except ConfigError as e:
+        raise ConfigError(f"{source}: {e}") from None
+
+
+def _apply(data: dict, base: Settings) -> Settings:
     unknown = data.keys() - TOP_LEVEL_KEYS
     if unknown:
         raise ConfigError(f"unknown config key(s): {', '.join(sorted(unknown))}")

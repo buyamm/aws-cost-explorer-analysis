@@ -21,9 +21,13 @@ def process(
     deliver: Callable[[list[Change]], None],
     now: str,
     save: bool = True,
+    state: State | None = None,
 ) -> list[Change]:
-    """Return the new/worse incidents. If `deliver` raises, nothing is saved, so they are sent next run."""
-    state, changes = merge(store.load(), anomalies, settings, fetch_start)
+    """Return the new/worse incidents. If `deliver` raises, nothing is saved, so they are sent next run.
+
+    `state`: already loaded from `store` (callers validate it before any billable request).
+    """
+    state, changes = merge(store.load() if state is None else state, anomalies, settings, fetch_start)
     if changes:
         deliver(changes)
         state = mark_alerted(state, changes, now)

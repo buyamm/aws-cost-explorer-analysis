@@ -238,7 +238,7 @@ Mỗi lần chạy có sự cố mới/xấu đi sẽ gửi đúng một tin nh�
 
 Không đặt webhook thì danh sách sự cố mới được in ra màn hình. Kết hợp `--fail-on-anomaly` để CI hoặc cron báo lỗi khi có điều mới.
 
-Lưu ý: chạy tay vẫn cần nhập MFA. Để chạy tự động hằng ngày không cần người, xem phần triển khai Lambda (spec 005).
+Lưu ý: chạy tay vẫn cần nhập MFA. Để chạy tự động hằng ngày không cần người, xem [Chạy tự động trên AWS Lambda](#chạy-tự-động-trên-aws-lambda).
 
 ## Đối chiếu với AWS CAD
 
@@ -250,6 +250,66 @@ AWS Cost Anomaly Detection (CAD) miễn phí và dùng mô hình ML, nhưng là 
 - Cần bật CAD trong account (có monitor) và role phải có quyền `ce:GetAnomalies`. Nếu không lấy được, tool in cảnh báo rồi chạy tiếp như bình thường.
 
 Lưu ý chi phí: tài liệu AWS không nói rõ `GetAnomalies` có bị tính $0.01/request như `GetCostAndUsage` hay không (thường chỉ 1 request mỗi lần chạy). Cách kiểm tra: chạy thử một lần rồi xem dòng Cost Explorer API trong Bills hôm sau. Vì vậy tính năng này mặc định tắt.
+
+## Chạy tự động trên AWS Lambda
+
+`infra/terraform/` triển khai tool vào chính account cần theo dõi: một Lambda chạy hằng ngày bằng EventBridge Scheduler (mặc định 02:00 UTC = 09:00 giờ Việt Nam). Lambda dùng quyền của execution role nên không cần MFA. Lambda lưu state và report vào S3, đọc webhook Slack từ SSM SecureString.
+
+Thành phần:
+
+| Tài nguyên | Ghi chú |
+|---|---|
+| Lambda `cost-anomaly` (python3.12) | Code đóng gói từ `src/`, boto3 có sẵn trong runtime. Chỉ chạy 1 lần tại một thời điểm, không tự retry |
+| IAM role của Lambda | Chỉ `ce:GetCostAndUsage` (+`ce:GetAnomalies` nếu `with_cad`), `s3:GetObject`/`PutObject` trên `state/incidents.json` và `reports/*`, `ssm:GetParameter` trên đúng parameter webhook, ghi log vào log group của nó. Trong code, mọi client vẫn có allowlist API |
+| S3 bucket `<name_prefix>-<account>-<region>` | Chặn public, bắt buộc TLS, mã hóa, versioning; report hết hạn sau `report_retention_days` (90) ngày, bản cũ của state sau 30 ngày |
+| EventBridge Scheduler | Không retry, vì mỗi lần chạy lại tốn thêm request Cost Explorer. Ngày lỗi sẽ được lần chạy hôm sau bù lại |
+| CloudWatch Logs | Giữ `log_retention_days` (30) ngày |
+
+Các bước (tự chạy, cần quyền tạo tài nguyên trong account):
+
+```sh
+# 1. Lưu webhook vào SSM (Terraform không bao giờ giữ giá trị này, nên nó không nằm trong state)
+aws ssm put-parameter --name /cost-anomaly/slack-webhook --type SecureString \
+  --value 'https://hooks.slack.com/services/...'
+
+# 2. Triển khai
+cd infra/terraform
+terraform init
+terraform apply -var 'slack_webhook_parameter_name=/cost-anomaly/slack-webhook'
+#   tùy chọn: -var with_cad=true   -var account_label=project-a
+#             -var "config_toml=$(cat ../../demo/cost-anomaly.toml)"
+
+# 3. Chạy thử một lần (không cần đợi lịch)
+aws lambda invoke --function-name cost-anomaly out.json && cat out.json
+```
+
+Biến Terraform:
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `slack_webhook_parameter_name` | `""` | Tên SSM SecureString chứa webhook (bắt đầu bằng `/`). Để trống thì không gửi Slack, chỉ ghi log |
+| `slack_webhook_kms_key_arn` | `""` | KMS key tự quản lý của parameter (thêm `kms:Decrypt`). Để trống nếu dùng `alias/aws/ssm` |
+| `with_cad` | `false` | Đối chiếu AWS CAD (thêm `ce:GetAnomalies`) |
+| `config_toml` | `""` | Nội dung file config TOML, như [File config](#file-config) |
+| `account_label` | account ID | Tên hiển thị trong report và Slack |
+| `schedule_expression` / `schedule_timezone` | `cron(0 2 * * ? *)` / `UTC` | Lịch chạy |
+| `name_prefix` | `cost-anomaly` | Tiền tố tên mọi tài nguyên (function, bucket, role, schedule) |
+| `aws_region` | `us-east-1` | Region của Lambda, bucket và lịch (Cost Explorer là global) |
+| `report_retention_days` | `90` | Số ngày giữ report trên S3 |
+| `log_retention_days` | `30` | Số ngày giữ log (giá trị CloudWatch hỗ trợ) |
+
+Output: `function_name`, `state_bucket`, `log_group_name`, `schedule_name`. Nếu đổi `name_prefix`, dùng `terraform output -raw function_name` khi gọi `aws lambda invoke`.
+
+Kết quả mỗi lần chạy: report ở `s3://<bucket>/reports/<ngày>/` và tin nhắn Slack nếu có sự cố mới/xấu đi. Bản tóm tắt nằm trong CloudWatch Logs. Khi gửi Slack thất bại, lần chạy báo lỗi trên CloudWatch và state không bị ghi, nên hôm sau cảnh báo sẽ được gửi lại.
+
+Chi phí ước tính mỗi tháng: khoảng 30–60 request Cost Explorer (≈ $0.30–0.60; thêm khoảng 30 request nếu bật `with_cad` và AWS có tính phí API này). Lambda, Scheduler, S3 và SSM standard parameter nằm trong free tier hoặc chỉ vài cent.
+
+Kiểm tra cấu hình mà không cần credential (mock provider, chỉ plan):
+
+```sh
+terraform -chdir=infra/terraform init -backend=false
+terraform -chdir=infra/terraform test
+```
 
 ## Cách phát hiện
 
@@ -313,6 +373,7 @@ Lưu ý: một service mới bị gắn NEW_SERVICE **mỗi ngày** cho tới kh
 | `provisional` | `true` nếu ngày đó chưa được Cost Explorer chốt số liệu (tạm tính) |
 | `month_impact` | `delta × số ngày còn lại trong tháng`: chi phí thêm nếu tiếp diễn |
 | `known` | `true` nếu service nằm trong `known` của file config |
+| `cad_match` | `true`/`false` khi chạy với `--with-cad` (AWS CAD có/không có anomaly cùng service và ngày); để trống nếu không đối chiếu |
 
 Các dòng được sắp theo ngày mới nhất trước, trong cùng ngày thì `delta` lớn trước.
 
@@ -322,6 +383,7 @@ Role có thể có quyền rộng, nhưng tool chỉ dùng đúng phần cần t
 
 - Khi gọi `sts:AssumeRole`, tool gửi kèm một **session policy** chỉ cho phép `ce:GetCostAndUsage` (thêm `ce:GetAnomalies` khi có `--with-cad`). Quyền thực tế là phần giao giữa quyền của role và session policy. Vì vậy credential tạm chỉ đọc được Cost Explorer, kể cả khi bị lộ.
 - Trong code, mỗi client có một allowlist API: client STS chỉ gọi được `AssumeRole`, client Cost Explorer chỉ gọi được `GetCostAndUsage` (và `GetAnomalies` khi có `--with-cad`). Session policy và allowlist được tạo từ cùng một danh sách nên không thể lệch nhau.
+- Khi chạy trên Lambda, tool không gọi AssumeRole nên không có session policy. Giới hạn quyền nằm ở inline policy của execution role (chỉ đúng các API và ARN ở bảng trên), cộng allowlist trong code: S3 chỉ `GetObject`/`PutObject`, SSM chỉ `GetParameter`, Cost Explorer như CLI.
 - Mỗi lần chạy thường tốn 1–2 request Cost Explorer ($0.01/request). `--max-pages` chặn trường hợp phân trang bất thường.
 
 CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ cho người có quyền xem chi phí, và không commit lên repo. `.gitignore` đã loại `*.csv`, `*_report.html` và `*_report.md`.
@@ -356,9 +418,14 @@ uv sync                                    # cài dependency (gồm pytest)
 uv run cost-anomaly --profile project-cost # chạy từ source
 uv run pytest -q                           # chạy toàn bộ test
 uv run pytest tests/test_detect.py -q      # một file test
+terraform -chdir=infra/terraform init -backend=false && terraform -chdir=infra/terraform test   # test Terraform (mock, không cần credential)
 uv build                                   # tạo dist/*.whl và dist/*.tar.gz để phát hành
 ```
 
 Test không gọi AWS hay Slack thật (`urllib.request.urlopen` được thay bằng stub, biến `COST_ANOMALY_SLACK_WEBHOOK` bị xóa trong mọi test). Chúng dùng credential giả, file config tạm, và response giả lập bằng `botocore.stub.Stubber` cùng các fixture JSON.
 
-Luồng xử lý chính: `auth` (AssumeRole + session policy) → `pipeline.run`: `guard` (allowlist API) → `fetch` (phân trang) → `transform` (ma trận service × ngày cho từng metric) → `detect` → `report` (CSV) → `analysis` → `html_report` / `md_report`.
+Luồng xử lý chính:
+
+- CLI (`cli.main`): `auth` (AssumeRole + session policy) → `pipeline.run`: `guard` (allowlist API) → `fetch` (phân trang) → `transform` (ma trận service × ngày cho từng metric) → `detect` → `cad` (nếu `--with-cad`) → `report` (CSV) → `analysis` → `html_report` / `md_report` → `alerting` (`state` gộp sự cố, `alert` gửi Slack).
+- Lambda (`lambda_handler.handler`): config từ `COST_ANOMALY_CONFIG` → webhook từ SSM → state từ S3 → `pipeline.run` (dùng credential của execution role) → CSV/report lên S3 → `alerting`.
+- Hạ tầng: `infra/terraform/` (test trong `infra/terraform/tests/`). Spec từng tính năng nằm trong `specs/`.

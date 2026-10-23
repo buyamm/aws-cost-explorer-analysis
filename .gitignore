@@ -8,3 +8,4 @@ __pycache__/
 !tests/fixtures/*.csv
 *_report.html
 *_report.md
+Nghiên cứu AWS Cost Anomaly Detection.md
