@@ -47,7 +47,7 @@ def render_markdown(report: Report) -> str:
                 [
                     r.anomaly.date.isoformat(),
                     r.anomaly.service,
-                    r.anomaly.kind,
+                    " · ".join([r.anomaly.kind, *r.labels]),
                     usd(r.anomaly.cost),
                     usd(r.anomaly.baseline_median),
                     usd(r.anomaly.mad),

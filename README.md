@@ -2,7 +2,7 @@
 
 Công cụ dòng lệnh phát hiện chi phí AWS tăng bất thường theo từng service, từng ngày.
 
-Tool lấy chi phí 90 ngày gần nhất từ AWS Cost Explorer (DAILY, group theo SERVICE, `UnblendedCost`, chỉ `RECORD_TYPE=Usage`). Mỗi ngày trong khung đánh giá được so với 30 ngày ngay trước nó bằng median + MAD, kết hợp ngưỡng USD tuyệt đối. Kết quả gồm:
+Tool lấy chi phí 90 ngày gần nhất từ AWS Cost Explorer (DAILY, group theo SERVICE, hai metric `UnblendedCost` và `NetAmortizedCost`, gồm usage thường lẫn phần được Savings Plans/RI che). Mỗi ngày trong khung đánh giá được so với 30 ngày ngay trước nó bằng median + MAD, kết hợp ngưỡng USD tuyệt đối. Kết quả gồm:
 
 - `anomalies.csv`: bảng bất thường.
 - `anomalies_report.html`: report có biểu đồ, nhận định và giải thích từng con số. File tự chứa nên mở offline được.
@@ -167,8 +167,9 @@ Thư mục trong `--output` phải tồn tại trước khi chạy.
 | `--min-delta` | `10` | Số USD tối thiểu vượt median thì SPIKE mới được báo |
 | `--new-threshold` | `10` | USD/ngày tối thiểu để báo NEW_SERVICE |
 | `--min-history` | `7` | Số ngày có chi phí > 0 trong baseline cần để dùng z-score. Ít hơn thì service được coi là service mới |
-| `--eval-days` | `7` | Số ngày được đánh giá, từ 1 đến 58 (để mọi ngày đánh giá đều có đủ 30 ngày baseline trong 90 ngày dữ liệu) |
+| `--eval-days` | `7` | Số ngày **đã chốt** được đánh giá, từ 1 đến 58 (để mọi ngày đánh giá đều có đủ 30 ngày baseline trong 90 ngày dữ liệu) |
 | `--max-pages` | `20` | Số request Cost Explorer tối đa (mỗi request $0.01) |
+| `--no-provisional` | | Không đánh giá 2 ngày gần nhất (chưa chốt số liệu), quay về khung cũ T−9…T−3 |
 | `--end-date` | hôm nay (UTC) | Ngày kết thúc khung lấy dữ liệu, dạng `YYYY-MM-DD`, không tính vào khung |
 | `--no-report` | | Không ghi report HTML/Markdown |
 
@@ -179,8 +180,10 @@ Mã thoát: `0` khi chạy thành công (kể cả khi có bất thường). `2`
 Với `--end-date` = T (mặc định là hôm nay):
 
 - Tool lấy dữ liệu các ngày `[T−90, T)`.
-- Bỏ qua 2 ngày gần nhất (T−2, T−1) vì Cost Explorer chưa chốt số liệu.
-- Đánh giá `--eval-days` ngày (mặc định 7, từ T−9 đến T−3). Mỗi ngày được so với 30 ngày ngay trước nó:
+- Đánh giá `--eval-days` ngày đã chốt (mặc định 7, từ T−9 đến T−3).
+- Đánh giá thêm 2 ngày gần nhất (T−2, T−1) với nhãn **tạm tính** (`provisional=true`): Cost Explorer chưa chốt số liệu nên con số có thể còn thay đổi, nhưng chạy hằng ngày sẽ thấy chi phí của hôm qua. Dùng `--no-provisional` để bỏ qua hai ngày này như trước.
+
+Mỗi ngày được so với 30 ngày ngay trước nó:
 
 ```text
 median = trung vị chi phí 30 ngày baseline (ngày không có chi phí tính là $0)
@@ -194,6 +197,22 @@ NEW_SERVICE  ⇔ baseline có < min_history ngày có chi phí và cost ≥ new_
 
 Median và MAD ít bị ảnh hưởng bởi các đỉnh cũ: một ngày tăng vọt trong quá khứ không kéo ngưỡng lên. Ngưỡng `min_delta` loại các biến động có z cao nhưng số tiền nhỏ.
 
+### Savings Plans, RI và nhãn `driver`
+
+Dữ liệu gồm cả usage được Savings Plans/RI che (`SavingsPlanCoveredUsage`, `DiscountedUsage`). Nếu bỏ phần này, khi cam kết hết hạn hoặc coverage thay đổi, usage "xuất hiện" và tool báo spike giả. Mỗi service/ngày có hai số đo, lấy trong cùng một request (không tốn thêm tiền):
+
+- **usage** (`UnblendedCost`): với phần Savings Plans che là giá on-demand tương đương; với phần RI che là $0 (phí RI nằm ở dòng RIFee, không thuộc service).
+- **amortized** (`NetAmortizedCost`): chi phí thực trả sau Savings Plans/RI.
+
+Tool chấm cả hai số đo. Một ngày được tính là "có chi phí" nếu một trong hai số đo > 0, nên service chạy hoàn toàn bằng RI không bị coi là service mới. Nếu usage bất thường thì báo theo usage (`metric=usage`). Nếu usage bình thường nhưng chi phí thực trả tăng đột biến thì báo theo amortized (`metric=amortized`).
+
+Nhãn `driver`:
+
+- `usage`: hai số đo cùng tăng, và mức tăng chi phí thực trả nằm trong ±25% mức tăng usage. Nghĩa là dùng nhiều hơn.
+- `rate`: các trường hợp còn lại, ví dụ Savings Plans hết hạn (usage phẳng, chi phí thực trả tăng) hoặc RI hết hạn (usage từ $0 lên giá on-demand). Nên xem lại cam kết, không phải workload.
+
+Giới hạn đã biết: nếu usage tăng nhưng phần tăng được Savings Plans còn dư che, chi phí thực trả tăng ít hơn usage nên ngày đó vẫn bị gắn `rate`. Phí cam kết không dùng hết (recurring fee) không được theo dõi.
+
 Lưu ý: một service mới bị gắn NEW_SERVICE **mỗi ngày** cho tới khi baseline của nó có đủ `min_history` ngày có chi phí. Service phát sinh thưa, ví dụ job chạy mỗi tuần một lần, cũng rơi vào trường hợp này. Report có ghi chú riêng cho trường hợp đó.
 
 ### Các cột trong CSV
@@ -203,11 +222,14 @@ Lưu ý: một service mới bị gắn NEW_SERVICE **mỗi ngày** cho tới kh
 | `date` | Ngày được đánh giá (UTC) |
 | `service` | Tên service theo Cost Explorer |
 | `kind` | `SPIKE` hoặc `NEW_SERVICE` |
-| `cost` | Chi phí trong ngày (USD) |
+| `cost` | Chi phí trong ngày (USD), theo số đo ở cột `metric` |
 | `baseline_median` | Median 30 ngày trước, tức mức "bình thường" |
 | `mad` | Median Absolute Deviation của 30 ngày đó |
 | `robust_z` | Số lần độ dao động thông thường mà chi phí vượt median; để trống với `NEW_SERVICE` |
 | `delta` | `cost − baseline_median`, số USD vượt mức bình thường |
+| `metric` | `usage` hoặc `amortized`: số liệu ở các cột trên lấy từ số đo nào |
+| `driver` | `usage` (dùng nhiều hơn) hoặc `rate` (do giá/coverage Savings Plans, RI) |
+| `provisional` | `true` nếu ngày đó chưa được Cost Explorer chốt số liệu (tạm tính) |
 
 Các dòng được sắp theo ngày mới nhất trước, trong cùng ngày thì `delta` lớn trước.
 
@@ -235,7 +257,7 @@ CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ
 
 ## Demo offline
 
-Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc. Demo không gọi AWS và không tốn phí.
+Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính). Demo không gọi AWS và không tốn phí.
 
 ```sh
 uv sync
@@ -256,4 +278,4 @@ uv build                                   # tạo dist/*.whl và dist/*.tar.gz 
 
 Test không gọi AWS thật. Chúng dùng credential giả, file config tạm, và response giả lập bằng `botocore.stub.Stubber` cùng các fixture JSON.
 
-Luồng xử lý chính: `auth` (AssumeRole + session policy) → `guard` (allowlist API) → `fetch` (phân trang) → `transform` (ma trận service × ngày) → `detect` → `report` (CSV) → `analysis` → `html_report` / `md_report`.
+Luồng xử lý chính: `auth` (AssumeRole + session policy) → `pipeline.run`: `guard` (allowlist API) → `fetch` (phân trang) → `transform` (ma trận service × ngày cho từng metric) → `detect` → `report` (CSV) → `analysis` → `html_report` / `md_report`.

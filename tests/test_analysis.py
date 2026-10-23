@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from cost_anomaly.analysis import build_report, near_miss, runs_of
+from cost_anomaly.analysis import COLUMNS, build_report, near_miss, runs_of
 from cost_anomaly.config import Settings
 from cost_anomaly.dates import compute_windows, date_range
 from cost_anomaly.detect import NEW_SERVICE, SPIKE, detect, score
@@ -9,7 +9,7 @@ from cost_anomaly.md_report import render_markdown
 
 TODAY = date(2026, 10, 15)
 SETTINGS = Settings()
-WINDOWS = compute_windows(TODAY, SETTINGS)
+WINDOWS = compute_windows(TODAY, Settings(include_provisional=False))  # settled days only
 DAYS = date_range(WINDOWS.fetch_start, WINDOWS.fetch_end)
 GENERATED = datetime(2026, 10, 15, 8, 0, tzinfo=timezone.utc)
 
@@ -116,3 +116,80 @@ def test_markdown_escapes_pipes_and_has_sections():
     assert "A\\|B" in md
     for heading in ("## Nhận định chính", "## Bảng bất thường", "## Cấu hình thuật toán", "## Giải thích các cột"):
         assert heading in md
+
+
+SP_DAY = date(2026, 10, 12)
+SP_USAGE = {"Fargate": series([78, 80, 82])}
+SP_PAID = {"Fargate": series([51, 52, 53], {d: 80 for d in DAYS if d >= SP_DAY})}
+
+
+def sp_report():
+    anomalies = detect(SP_USAGE, WINDOWS.eval_days, SETTINGS, amortized=SP_PAID)
+    return build_report(SP_USAGE, WINDOWS, SETTINGS, anomalies, "demo", GENERATED, amortized=SP_PAID)
+
+
+def test_amortized_row_is_rescored_from_the_amortized_matrix():
+    (row,) = sp_report().rows
+    assert row.anomaly.metric == "amortized"
+    assert row.score.cost == row.anomaly.cost == 80
+    assert row.score.baseline_median == 52
+
+
+def test_rate_row_is_labelled_and_explained():
+    (row,) = sp_report().rows
+    assert row.labels == ["do giá/coverage"]
+    assert "chi phí thực trả" in row.explanation and "Savings Plans/RI" in row.explanation
+
+
+def test_usage_driven_row_has_no_labels():
+    r = report_for(MATRIX)
+    assert all(x.labels == [] for x in r.rows)
+
+
+def test_ri_covered_service_is_not_a_new_service_near_miss():
+    usage = {"ElastiCache": series([0.0], {SP_DAY: 6.0})}
+    paid = {"ElastiCache": series([60.0])}
+    r = build_report(usage, WINDOWS, SETTINGS, [], "demo", GENERATED, amortized=paid)
+    (m,) = r.near_misses
+    assert m.score.history_days == 30 and "Service mới" not in m.reason
+
+
+def test_columns_and_params_document_new_fields():
+    r = sp_report()
+    assert {"metric", "driver", "provisional"} <= {c for c, _ in COLUMNS}
+    assert "driver_tolerance" in {p.name for p in r.params}
+
+
+def test_html_and_markdown_show_rate_badge():
+    r = sp_report()
+    assert "do giá/coverage" in render_html(r)
+    assert "SPIKE · do giá/coverage" in render_markdown(r)
+
+
+def provisional_report():
+    w = compute_windows(TODAY, SETTINGS)
+    matrix = {"EC2": series([98, 100, 102], {date(2026, 10, 14): 300})}
+    anomalies = detect(matrix, w.eval_days, SETTINGS, provisional=frozenset(w.provisional_days))
+    return build_report(matrix, w, SETTINGS, anomalies, "demo", GENERATED)
+
+
+def test_provisional_row_is_labelled_tam_tinh():
+    (row,) = provisional_report().rows
+    assert row.labels == ["tạm tính"]
+    assert "tạm tính" in render_html(provisional_report())
+    assert "SPIKE · tạm tính" in render_markdown(provisional_report())
+
+
+def test_insight_explains_provisional_days():
+    text = "\n".join(provisional_report().insights)
+    assert "2026-10-13 → 2026-10-14" in text and "tạm tính" in text
+
+
+def test_insight_without_provisional_keeps_skipped_note():
+    text = "\n".join(report_for(MATRIX).insights)
+    assert "không được đánh giá" in text
+
+
+def test_params_list_include_provisional_flag():
+    params = {p.name: p for p in provisional_report().params}
+    assert params["include_provisional"].flag == "--no-provisional"

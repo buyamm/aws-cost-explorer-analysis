@@ -12,17 +12,33 @@ def load_fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text())
 
 
-def results_from_matrix(matrix: dict[str, dict[date, float]]) -> list[dict]:
-    """Build Cost Explorer ResultsByTime entries from {service: {day: cost}}."""
-    days = sorted({d for series in matrix.values() for d in series})
+def results_from_matrix(
+    matrix: dict[str, dict[date, float]], amortized: dict[str, dict[date, float]] | None = None
+) -> list[dict]:
+    """Build Cost Explorer ResultsByTime entries from {service: {day: cost}}.
+
+    `amortized` gives NetAmortizedCost per service; services missing from it pay the usage cost.
+    """
+    amortized = amortized or {}
+    services = sorted(set(matrix) | set(amortized))
+    days = sorted({d for m in (matrix, amortized) for series in m.values() for d in series})
+
+    def metrics(service: str, d: date) -> dict:
+        usage = matrix.get(service, {}).get(d, 0.0)
+        paid = amortized[service].get(d, 0.0) if service in amortized else usage
+        return {
+            "UnblendedCost": {"Amount": str(usage), "Unit": "USD"},
+            "NetAmortizedCost": {"Amount": str(paid), "Unit": "USD"},
+        }
+
     return [
         {
             "TimePeriod": {"Start": d.isoformat(), "End": date.fromordinal(d.toordinal() + 1).isoformat()},
             "Total": {},
             "Groups": [
-                {"Keys": [service], "Metrics": {"UnblendedCost": {"Amount": str(series[d]), "Unit": "USD"}}}
-                for service, series in sorted(matrix.items())
-                if series.get(d, 0.0) > 0
+                {"Keys": [service], "Metrics": metrics(service, d)}
+                for service in services
+                if any(float(m["Amount"]) > 0 for m in metrics(service, d).values())
             ],
             "Estimated": False,
         }

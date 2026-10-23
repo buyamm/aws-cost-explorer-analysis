@@ -5,10 +5,12 @@ from datetime import date, datetime, timedelta
 
 from .config import Settings
 from .dates import Windows, date_range
-from .detect import MAD_TO_SIGMA, NEW_SERVICE, SPIKE, Anomaly, Score, score
+from .detect import AMORTIZED, MAD_TO_SIGMA, NEW_SERVICE, RATE, SPIKE, Anomaly, Score, score_pair
 from .transform import CostMatrix
 
 NEAR_MISS_LIMIT = 10
+RATE_LABEL = "do giá/coverage"
+PROVISIONAL_LABEL = "tạm tính"
 
 
 def usd(v: float) -> str:
@@ -29,6 +31,7 @@ class AnomalyRow:
     score: Score
     severity: str
     explanation: str
+    labels: list[str]  # short Vietnamese tags shown next to the kind
 
 
 @dataclass(frozen=True)
@@ -93,11 +96,14 @@ COLUMNS = [
     ("date", "Ngày được đánh giá (UTC). Mỗi ngày được so với 30 ngày ngay trước nó."),
     ("service", "Tên service theo dimension SERVICE của Cost Explorer."),
     ("kind", "SPIKE: tăng đột biến so với lịch sử. NEW_SERVICE: service chưa đủ lịch sử nhưng chi phí đã vượt ngưỡng."),
-    ("cost", "Chi phí UnblendedCost (USD, chỉ RECORD_TYPE=Usage) của service trong ngày đó."),
+    ("cost", "Chi phí của service trong ngày đó (USD) theo số đo ở cột metric. Dữ liệu gồm Usage và phần được Savings Plans/RI che (SavingsPlanCoveredUsage, DiscountedUsage)."),
     ("baseline_median", "Trung vị chi phí 30 ngày trước: mức \"bình thường\" của service. Ngày không có chi phí được tính là 0."),
     ("mad", "Median Absolute Deviation: trung vị của |chi phí − median|, thước đo độ dao động ít bị ảnh hưởng bởi các đỉnh cũ."),
     ("robust_z", "(cost − median) / σ̂, với σ̂ = max(1.4826 × MAD, 1% × median, $0.01). Nghĩa là chi phí cách mức bình thường bao nhiêu lần độ dao động thông thường. Để trống với NEW_SERVICE."),
     ("delta", "cost − baseline_median: số USD vượt mức bình thường trong ngày."),
+    ("metric", "usage: số liệu theo UnblendedCost (giá on-demand tương đương với phần Savings Plans che, $0 với phần RI che). amortized: theo NetAmortizedCost, tức chi phí thực trả sau Savings Plans/RI; chỉ dùng khi usage không bất thường."),
+    ("driver", "usage: mức sử dụng tăng, hai số đo cùng tăng xấp xỉ bằng nhau. rate: tăng do giá hoặc coverage Savings Plans/RI thay đổi (ví dụ cam kết hết hạn), không phải do dùng nhiều hơn."),
+    ("provisional", "true: ngày thuộc 2 ngày gần nhất, Cost Explorer chưa chốt số liệu nên con số có thể còn thay đổi (tạm tính)."),
 ]
 
 FORMULA = [
@@ -107,6 +113,8 @@ FORMULA = [
     "z = (cost − median) / σ̂",
     "SPIKE ⇔ service có ≥ min_history ngày có chi phí trong baseline, z > k và cost − median ≥ min_delta",
     "NEW_SERVICE ⇔ service có < min_history ngày có chi phí trong baseline và cost ≥ new_threshold",
+    "Mỗi ngày được chấm trên hai số đo: usage (UnblendedCost) và amortized (NetAmortizedCost). Một ngày có \"chi phí\" nếu một trong hai số đo > 0",
+    "driver = usage ⇔ cả hai số đo cùng tăng và Δamortized nằm trong ±driver_tolerance của Δusage; ngược lại driver = rate",
 ]
 
 WHY_ROBUST = (
@@ -124,8 +132,10 @@ def build_params(s: Settings) -> list[Param]:
         Param("min_history", "--min-history", f"{s.min_history} ngày", "Số ngày có chi phí > 0 tối thiểu trong baseline để dùng z-score. Ít hơn thì service được coi là mới hoặc phát sinh thưa."),
         Param("baseline_days", None, f"{s.baseline_days} ngày", "Số ngày ngay trước mỗi ngày đánh giá được dùng làm mức chuẩn."),
         Param("eval_days", "--eval-days", f"{s.eval_days} ngày", "Số ngày được kiểm tra bất thường trong mỗi lần chạy (1–58, để mọi ngày đánh giá đều đủ 30 ngày baseline)."),
-        Param("exclude_recent_days", None, f"{s.exclude_recent_days} ngày", "Bỏ qua các ngày gần nhất vì Cost Explorer chưa chốt số liệu (Estimated), dễ báo sai."),
+        Param("exclude_recent_days", None, f"{s.exclude_recent_days} ngày", "Số ngày gần nhất Cost Explorer chưa chốt số liệu. Chúng không được tính là ngày đã chốt trong --eval-days."),
+        Param("include_provisional", "--no-provisional", "có" if s.include_provisional else "không", "Vẫn đánh giá các ngày chưa chốt và gắn nhãn tạm tính, để thấy chi phí hôm qua trong lần chạy hằng ngày. Con số có thể còn thay đổi."),
         Param("lookback_days", None, f"{s.lookback_days} ngày", "Tổng số ngày dữ liệu lấy từ Cost Explorer (phải đủ cho baseline của ngày đánh giá sớm nhất)."),
+        Param("driver_tolerance", None, f"±{s.driver_tolerance:.0%}", "Độ lệch tối đa giữa mức tăng chi phí thực trả và mức tăng usage để coi là do dùng nhiều hơn (driver = usage)."),
         Param("max_pages", "--max-pages", str(s.max_pages), "Giới hạn số request GetCostAndUsage (mỗi request $0.01)."),
     ]
 
@@ -144,6 +154,18 @@ def ratio_text(cost: float, med: float) -> str:
     return f"gấp {cost / med:.1f} lần median" if med > 0 else "median"
 
 
+def driver_note(usage: Score, amortized: Score) -> str:
+    return (
+        f" Gắn nhãn {RATE_LABEL}: chi phí thực trả (NetAmortizedCost) thay đổi {usd(amortized.delta)} trong khi chi phí "
+        f"usage theo giá on-demand thay đổi {usd(usage.delta)}, nên phần tăng đến từ thay đổi Savings Plans/RI hoặc đơn giá, "
+        "không phải do dùng nhiều hơn."
+    )
+
+
+def labels(a: Anomaly) -> list[str]:
+    return [RATE_LABEL] * (a.driver == RATE) + [PROVISIONAL_LABEL] * a.provisional
+
+
 def explain(a: Anomaly, s: Score, settings: Settings) -> str:
     if a.kind == NEW_SERVICE:
         history = (
@@ -159,8 +181,9 @@ def explain(a: Anomaly, s: Score, settings: Settings) -> str:
         scale = f"σ̂ = {MAD_TO_SIGMA} × MAD {usd(s.mad)} = {usd(s.scale)}"
     else:
         scale = f"MAD gần bằng 0 (chi phí rất ổn định) nên σ̂ lấy mức sàn {usd(s.scale)}"
+    measure = "Chi phí thực trả (amortized)" if a.metric == AMORTIZED else "Chi phí"
     return (
-        f"Chi phí {usd(a.cost)}, {ratio_text(a.cost, a.baseline_median)} {usd(a.baseline_median)}, vượt {usd(a.delta)} "
+        f"{measure} {usd(a.cost)}, {ratio_text(a.cost, a.baseline_median)} {usd(a.baseline_median)}, vượt {usd(a.delta)} "
         f"(≥ min_delta {usd(settings.min_delta)}). {scale} → z = {s.robust_z:.2f}, vượt ngưỡng k = {settings.k:g}."
     )
 
@@ -188,14 +211,16 @@ def near_miss(s: Score, settings: Settings) -> str | None:
     return None
 
 
-def chart_points(series: dict[date, float], windows: Windows, settings: Settings) -> list[ChartPoint]:
+def chart_points(
+    series: dict[date, float], windows: Windows, settings: Settings, paid: dict[date, float] | None = None
+) -> list[ChartPoint]:
     first_scored = windows.fetch_start + timedelta(days=settings.baseline_days)
     points = []
     for d in date_range(windows.fetch_start, windows.fetch_end):
         if d < first_scored:
             points.append(ChartPoint(d, series.get(d, 0.0), None, None))
             continue
-        s = score(series, d, settings)
+        s, _ = score_pair(series, series if paid is None else paid, d, settings)
         if s.history_days < settings.min_history:
             threshold = settings.new_threshold
         else:
@@ -227,15 +252,17 @@ def fmt_run(run: tuple[date, date]) -> str:
     return run[0].isoformat() if run[0] == run[1] else f"{run[0].isoformat()} → {run[1].isoformat()}"
 
 
-def service_insight(r: ServiceRollup, matrix: CostMatrix, windows: Windows, settings: Settings) -> str:
-    series = matrix[r.service]
+def service_insight(
+    r: ServiceRollup, matrix: CostMatrix, amortized: CostMatrix, windows: Windows, settings: Settings
+) -> str:
+    series, paid = matrix.get(r.service, {}), amortized.get(r.service, {})
     last_eval = windows.eval_days[-1]
 
     if r.kinds == [NEW_SERVICE]:
         flagged = [series[d] for d in r.days]
         first, last = flagged[0], flagged[-1]
         trend = "tăng dần" if last > first * 1.2 else "giảm dần" if last < first * 0.8 else "khá ổn định"
-        s = score(series, r.days[0], settings)
+        s, _ = score_pair(series, paid, r.days[0], settings)
         text = (
             f"{r.service}: chi phí mới xuất hiện, bị gắn NEW_SERVICE {len(r.days)} ngày ({fmt_run((r.days[0], r.days[-1]))}), "
             f"{trend} từ {usd(first)} đến {usd(last)}/ngày, tổng {usd(sum(flagged))}. "
@@ -272,7 +299,8 @@ def service_insight(r: ServiceRollup, matrix: CostMatrix, windows: Windows, sett
         return text + f" Bất thường vẫn còn ở ngày đánh giá mới nhất ({last_eval.isoformat()}), nên kiểm tra ngay."
     # Not ongoing, so the day after the last run is an evaluated day that was not flagged.
     after = r.runs[-1][1] + timedelta(days=1)
-    s = score(series, after, settings)
+    su, sa = score_pair(series, paid, after, settings)
+    s = sa if p.metric == AMORTIZED else su
     return text + (
         f" Ngày {after.isoformat()} chi phí đã về {usd(s.cost)} (median {usd(s.baseline_median)}), "
         "trong biên độ bình thường: có vẻ là sự kiện nhất thời."
@@ -286,20 +314,29 @@ def build_report(
     anomalies: list[Anomaly],
     profile: str,
     generated_at: datetime,
+    amortized: CostMatrix | None = None,
 ) -> Report:
+    amortized = matrix if amortized is None else amortized
+    services = sorted(matrix.keys() | amortized.keys())
+
+    def pair(service: str, day: date) -> tuple[Score, Score]:
+        return score_pair(matrix.get(service, {}), amortized.get(service, {}), day, settings)
+
     ordered = sorted(anomalies, key=lambda a: (a.date, a.delta), reverse=True)
     rows = []
     for a in ordered:
-        s = score(matrix[a.service], a.date, settings)
-        rows.append(AnomalyRow(a, s, severity(a.robust_z, settings.k), explain(a, s, settings)))
+        su, sa = pair(a.service, a.date)
+        s = sa if a.metric == AMORTIZED else su
+        text = explain(a, s, settings) + (driver_note(su, sa) if a.driver == RATE else "")
+        rows.append(AnomalyRow(a, s, severity(a.robust_z, settings.k), text, labels(a)))
 
     flagged = {(a.service, a.date) for a in anomalies}
     misses = []
-    for service, series in sorted(matrix.items()):
+    for service in services:
         for d in windows.eval_days:
             if (service, d) in flagged:
                 continue
-            s = score(series, d, settings)
+            s, _ = pair(service, d)
             reason = near_miss(s, settings)
             if reason:
                 misses.append(NearMiss(d, service, s, reason))
@@ -307,19 +344,20 @@ def build_report(
 
     last_eval = windows.eval_days[-1]
     rollups = build_rollups(rows, last_eval)
-    eval_spend = sum(series.get(d, 0.0) for series in matrix.values() for d in windows.eval_days)
+    # What was actually paid: the usage measure prices Savings Plan covered usage at on-demand rates.
+    eval_spend = sum(series.get(d, 0.0) for series in amortized.values() for d in windows.eval_days)
     excess = sum(a.delta for a in anomalies)
 
     period = f"{windows.eval_days[0].isoformat()} → {last_eval.isoformat()}"
     if not anomalies:
         insights = [
             f"Không phát hiện bất thường nào trong {len(windows.eval_days)} ngày đánh giá ({period}) "
-            f"trên {len(matrix)} service. Tổng chi phí khung đánh giá {usd(eval_spend)}."
+            f"trên {len(services)} service. Tổng chi phí khung đánh giá {usd(eval_spend)}."
         ]
     else:
         share = f" ({excess / eval_spend:.0%} tổng chi phí khung)" if eval_spend else ""
         insights = [
-            f"Trong {len(windows.eval_days)} ngày đánh giá ({period}), tổng chi phí là {usd(eval_spend)} trên {len(matrix)} service. "
+            f"Trong {len(windows.eval_days)} ngày đánh giá ({period}), tổng chi phí là {usd(eval_spend)} trên {len(services)} service. "
             f"Phát hiện {len(anomalies)} bất thường ({sum(a.kind == SPIKE for a in anomalies)} SPIKE, "
             f"{sum(a.kind == NEW_SERVICE for a in anomalies)} NEW_SERVICE) ở {len(rollups)} service, "
             f"tổng phần vượt mức bình thường {usd(excess)}{share}."
@@ -327,16 +365,24 @@ def build_report(
         top = rollups[0]
         if len(rollups) > 1 and excess > 0:
             insights.append(f"Đóng góp lớn nhất: {top.service} với {usd(top.excess)} ({top.excess / excess:.0%} phần vượt).")
-        insights += [service_insight(r, matrix, windows, settings) for r in rollups]
+        insights += [service_insight(r, matrix, amortized, windows, settings) for r in rollups]
     if misses:
         insights.append(
             f"Có {len(misses)} biến động không bị báo nhờ bộ lọc ngưỡng (xem mục \"Biến động bị lọc\"). "
             "Nếu thấy cần bắt các trường hợp này, hãy cân nhắc giảm --min-delta hoặc --k."
         )
-    insights.append(
-        f"Lưu ý: {settings.exclude_recent_days} ngày gần nhất ({(last_eval + timedelta(days=1)).isoformat()} → "
-        f"{(windows.fetch_end - timedelta(days=1)).isoformat()}) không được đánh giá vì Cost Explorer chưa chốt số liệu."
-    )
+    unsettled = f"{settings.exclude_recent_days} ngày gần nhất"
+    if windows.provisional_days:
+        span = f"{windows.provisional_days[0].isoformat()} → {windows.provisional_days[-1].isoformat()}"
+        insights.append(
+            f"Lưu ý: {unsettled} ({span}) được đánh giá với nhãn {PROVISIONAL_LABEL} vì Cost Explorer chưa chốt số liệu; "
+            "con số có thể còn thay đổi ở lần chạy sau."
+        )
+    else:
+        insights.append(
+            f"Lưu ý: {unsettled} ({(last_eval + timedelta(days=1)).isoformat()} → "
+            f"{(windows.fetch_end - timedelta(days=1)).isoformat()}) không được đánh giá vì Cost Explorer chưa chốt số liệu."
+        )
 
     next_steps = []
     if any(a.kind == SPIKE for a in anomalies):
@@ -352,7 +398,10 @@ def build_report(
     if any(r.ongoing for r in rollups):
         next_steps.append("Ưu tiên các service còn bất thường ở ngày đánh giá mới nhất, vì chi phí có thể vẫn đang tăng.")
 
-    charts = {r.service: chart_points(matrix[r.service], windows, settings) for r in rollups}
+    charts = {
+        r.service: chart_points(matrix.get(r.service, {}), windows, settings, amortized.get(r.service, {}))
+        for r in rollups
+    }
     return Report(
         profile=profile,
         generated_at=generated_at,

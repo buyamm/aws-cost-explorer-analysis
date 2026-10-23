@@ -12,13 +12,19 @@ class TooManyPages(RuntimeError):
     pass
 
 
+# Usage measure (on-demand-equivalent for Savings Plans) and what was effectively paid.
+METRICS = ["UnblendedCost", "NetAmortizedCost"]
+# Covered usage must be included, or SP/RI expiry shows up as a fake usage spike.
+RECORD_TYPES = ["Usage", "SavingsPlanCoveredUsage", "DiscountedUsage"]
+
+
 def build_request(start: date, end: date) -> dict[str, Any]:
     return {
         "TimePeriod": {"Start": start.isoformat(), "End": end.isoformat()},
         "Granularity": "DAILY",
-        "Metrics": ["UnblendedCost"],
+        "Metrics": METRICS,
         "GroupBy": [{"Type": "DIMENSION", "Key": "SERVICE"}],
-        "Filter": {"Dimensions": {"Key": "RECORD_TYPE", "Values": ["Usage"]}},
+        "Filter": {"Dimensions": {"Key": "RECORD_TYPE", "Values": RECORD_TYPES}},
     }
 
 

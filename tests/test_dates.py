@@ -15,11 +15,16 @@ def test_fetch_window_is_90_days_ending_yesterday():
     assert len(date_range(w.fetch_start, w.fetch_end)) == 90
 
 
-def test_eval_days_skip_two_most_recent_days():
+def test_two_most_recent_days_are_evaluated_as_provisional():
     w = compute_windows(TODAY, Settings())
+    assert w.eval_days == [date(2026, 10, d) for d in range(6, 15)]
+    assert w.provisional_days == [date(2026, 10, 13), date(2026, 10, 14)]
+
+
+def test_without_provisional_eval_days_skip_two_most_recent_days():
+    w = compute_windows(TODAY, Settings(include_provisional=False))
     assert w.eval_days == [date(2026, 10, d) for d in range(6, 13)]
-    assert date(2026, 10, 13) not in w.eval_days
-    assert date(2026, 10, 14) not in w.eval_days
+    assert w.provisional_days == []
 
 
 def test_baseline_is_30_days_before_day():

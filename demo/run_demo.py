@@ -35,10 +35,14 @@ DUMMY_KEYS = {"aws_access_key_id": "DEMO", "aws_secret_access_key": "DEMO"}
 # --------------------------------------------------------------------------- data
 
 
-def simulate_costs(days: list[date], eval_days: list[date], seed: int = 7) -> dict[str, dict[date, float]]:
-    """Synthetic daily costs per service, with scenarios planted inside the eval window."""
+Matrix = dict[str, dict[date, float]]
+
+
+def simulate_costs(days: list[date], windows, seed: int = 7) -> tuple[Matrix, Matrix]:
+    """Synthetic (usage, amortized) daily costs per service, with scenarios planted in the eval window."""
     rng = random.Random(seed)
-    e = eval_days  # oldest first, 7 days
+    e = [d for d in windows.eval_days if d not in windows.provisional_days]  # settled, oldest first, 7 days
+    p = windows.provisional_days  # T−2, T−1
 
     def series(base: float, noise: float, weekend: float = 1.0, trend: float = 0.0) -> dict[date, float]:
         out = {}
@@ -55,10 +59,14 @@ def simulate_costs(days: list[date], eval_days: list[date], seed: int = 7) -> di
         "AWS Lambda": series(5, 0.08),
         "AmazonCloudWatch": series(12, 0.04),
         "Amazon Bedrock": {d: 0.0 for d in days},
+        "AWS Fargate": series(80, 0.01),
+        "Amazon ElastiCache": {d: 0.0 for d in days},
     }
 
-    # 1. EC2 compute spike (someone launched a fleet of large instances for a day)
-    m["Amazon Elastic Compute Cloud - Compute"][e[5]] = 540.0
+    # 1. EC2 compute spike (someone launched a fleet of large on-demand instances for a day)
+    ec2 = "Amazon Elastic Compute Cloud - Compute"
+    normal_ec2 = m[ec2][e[5]]
+    m[ec2][e[5]] = 540.0
     # 2. NAT Gateway / data transfer surge for two days
     m["EC2 - Other"][e[3]] = 96.5
     m["EC2 - Other"][e[4]] = 88.2
@@ -67,19 +75,41 @@ def simulate_costs(days: list[date], eval_days: list[date], seed: int = 7) -> di
         m["Amazon Bedrock"][d] = round(30 + 8 * i + rng.uniform(-2, 2), 4)
     # 4. Lambda doubles, but +$7 stays under --min-delta → filtered as noise
     m["AWS Lambda"][e[2]] = 12.0
+    # 5. CloudWatch log ingestion explodes yesterday: provisional data
+    m["AmazonCloudWatch"][p[-1]] = 64.0
+
+    # What was actually paid. Uncovered services pay the usage cost.
+    paid = {svc: dict(s) for svc, s in m.items()}
+    # EC2 Compute is 25% Savings Plan covered at a 40% discount: pays 90% of the on-demand equivalent;
+    # the extra fleet on e[5] is on-demand, so it adds the same dollars to both measures.
+    paid[ec2] = {d: round(v * 0.9, 4) for d, v in m[ec2].items()}
+    paid[ec2][e[5]] = round(normal_ec2 * 0.9 + 540.0 - normal_ec2, 4)
+    # 6. Fargate Savings Plan expires: usage flat, paid goes from 65% of on-demand to 100%
+    paid["AWS Fargate"] = {d: round(v * (1.0 if d >= e[2] else 0.65), 4) for d, v in m["AWS Fargate"].items()}
+    # 7. ElastiCache fully covered by a Reserved Instance (usage measure $0, RI cost $60/day) until it expires
+    for d in days:
+        expired = d >= e[4]
+        m["Amazon ElastiCache"][d] = round(95.0 * (1 + rng.gauss(0, 0.01)), 4) if expired else 0.0
+        paid["Amazon ElastiCache"][d] = m["Amazon ElastiCache"][d] if expired else round(60 * (1 + rng.gauss(0, 0.01)), 4)
     # S3 grows slowly the whole time → trend, not a spike → no alert
-    return m
+    return m, paid
 
 
-def to_results(matrix: dict[str, dict[date, float]], days: list[date]) -> list[dict]:
+def to_results(usage: Matrix, paid: Matrix, days: list[date]) -> list[dict]:
+    def metrics(svc: str, d: date) -> dict:
+        return {
+            "UnblendedCost": {"Amount": f"{usage[svc][d]:.4f}", "Unit": "USD"},
+            "NetAmortizedCost": {"Amount": f"{paid[svc][d]:.4f}", "Unit": "USD"},
+        }
+
     return [
         {
             "TimePeriod": {"Start": d.isoformat(), "End": (d + timedelta(days=1)).isoformat()},
             "Total": {},
             "Groups": [
-                {"Keys": [svc], "Metrics": {"UnblendedCost": {"Amount": f"{s[d]:.4f}", "Unit": "USD"}}}
-                for svc, s in sorted(matrix.items())
-                if s[d] > 0
+                {"Keys": [svc], "Metrics": metrics(svc, d)}
+                for svc in sorted(usage)
+                if usage[svc][d] > 0 or paid[svc][d] > 0
             ],
             "Estimated": d >= days[-2],
         }
@@ -188,8 +218,8 @@ def header(msg: str) -> None:
     print(f"\n\033[1m{msg}\033[0m")
 
 
-def print_matrix_summary(matrix, eval_days):
-    header("Simulated daily cost in the evaluation window (USD)")
+def print_matrix_summary(matrix, eval_days, title="Simulated daily usage cost in the evaluation window (USD)"):
+    header(title)
     cols = [d.strftime("%m-%d") for d in eval_days]
     print(f"  {'service':<40}" + "".join(f"{c:>9}" for c in cols))
     for svc, s in sorted(matrix.items()):
@@ -200,23 +230,29 @@ def print_anomalies(path: Path):
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
     header(f"Anomalies ({len(rows)}) — from {path}")
-    print(f"  {'date':<11}{'kind':<13}{'service':<40}{'cost':>9}{'median':>9}{'delta':>9}{'z':>8}")
+    print(
+        f"  {'date':<11}{'kind':<13}{'service':<40}{'cost':>9}{'median':>9}{'delta':>9}{'z':>8}"
+        f"  {'metric':<10}{'driver':<7}provisional"
+    )
     for r in rows:
         color = "\033[31m" if r["kind"] == "SPIKE" else "\033[33m"
         print(
             f"  {r['date']:<11}{color}{r['kind']:<13}\033[0m{r['service'][:39]:<40}"
             f"{float(r['cost']):>9.2f}{float(r['baseline_median']):>9.2f}{float(r['delta']):>9.2f}"
-            f"{r['robust_z'] or '—':>8}"
+            f"{r['robust_z'] or '—':>8}  {r['metric']:<10}{r['driver']:<7}{r['provisional']}"
         )
 
 
 SCENARIOS = """\
-  • EC2 Compute ×1.7 for one day            → expect SPIKE
+  • EC2 Compute ×1.7 for one day (on-demand) → expect SPIKE, driver=usage
   • EC2 - Other (NAT/data transfer) ×3.5, 2 days → expect 2× SPIKE
   • Amazon Bedrock appears from nothing     → expect NEW_SERVICE each day (< 7 days history)
   • AWS Lambda $5 → $12 (z high, +$7)       → filtered by --min-delta 10
   • S3 grows slowly over 90 days            → trend, no alert
-  • RDS, CloudWatch steady                  → no alert"""
+  • Fargate Savings Plan expires, usage flat → expect amortized SPIKE, driver=rate (not a usage spike)
+  • ElastiCache RI expires ($0 usage → $95) → expect SPIKE, driver=rate (not NEW_SERVICE)
+  • CloudWatch $12 → $64 yesterday (T−1)    → expect SPIKE, provisional=true
+  • RDS steady                              → no alert"""
 
 
 def main() -> int:
@@ -237,17 +273,21 @@ def main() -> int:
 
     windows = compute_windows(args.end_date, Settings())
     days = date_range(windows.fetch_start, windows.fetch_end)
-    matrix = simulate_costs(days, windows.eval_days)
+    matrix, paid = simulate_costs(days, windows)
 
     header("cost-anomaly — offline demo (no AWS calls)")
     print(f"  Fetch window : {windows.fetch_start} → {windows.fetch_end} (exclusive), {len(days)} days")
-    print(f"  Evaluate     : {windows.eval_days[0]} → {windows.eval_days[-1]} (last 2 days skipped: CE still settling)")
+    print(
+        f"  Evaluate     : {windows.eval_days[0]} → {windows.eval_days[-1]} "
+        f"(last 2 days provisional: CE still settling)"
+    )
     print(f"  Baseline     : 30 days before each evaluated day, median + MAD")
     header("Planted scenarios")
     print(SCENARIOS)
     print_matrix_summary(matrix, windows.eval_days)
+    print_matrix_summary(paid, windows.eval_days, "Simulated amortized (actually paid) cost (USD)")
 
-    stubs = install_fake_aws(to_results(matrix, days), windows.fetch_start, windows.fetch_end)
+    stubs = install_fake_aws(to_results(matrix, paid, days), windows.fetch_start, windows.fetch_end)
     header(f"Running: cost-anomaly --profile {PROFILE} --end-date {args.end_date} --output {args.output}")
     code = cli.main(["--profile", PROFILE, "--end-date", args.end_date.isoformat(), "--output", str(args.output)])
     for s in stubs:

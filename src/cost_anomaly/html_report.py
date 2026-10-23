@@ -90,6 +90,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: now
 td.why { min-width: 320px; color: var(--ink-2); }
 td.date, td code { white-space: nowrap; }
 td.svc { min-width: 150px; }
+.tag { display: inline-block; margin-top: 4px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px;
+  font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .badge { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-weight: 600; }
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
 ol.formula { padding-left: 20px; } ol.formula li { margin: 4px 0; }
@@ -225,6 +227,10 @@ def badge(kind: str) -> str:
     return f'<span class="badge">{mark}{KIND_LABEL[kind]}</span>'
 
 
+def tags(labels: list[str]) -> str:
+    return "".join(f' <span class="tag">{escape(label)}</span>' for label in labels)
+
+
 def tile(label: str, value: str, sub: str = "") -> str:
     sub_html = f'<div class="sub">{escape(sub)}</div>' if sub else ""
     return f'<div class="card tile"><div class="label">{escape(label)}</div><div class="value">{escape(value)}</div>{sub_html}</div>'
@@ -306,7 +312,7 @@ def section_table(report: Report) -> str:
         "<tr>"
         f'<td class="date">{r.anomaly.date.isoformat()}</td>'
         f'<td class="svc">{escape(r.anomaly.service)}</td>'
-        f"<td>{badge(r.anomaly.kind)}</td>"
+        f"<td>{badge(r.anomaly.kind)}{tags(r.labels)}</td>"
         f'<td class="num">{escape(usd(r.anomaly.cost))}</td>'
         f'<td class="num">{escape(usd(r.anomaly.baseline_median))}</td>'
         f'<td class="num">{escape(usd(r.anomaly.mad))}</td>'

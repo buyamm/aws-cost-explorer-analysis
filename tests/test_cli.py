@@ -119,7 +119,8 @@ def test_eval_days_narrows_the_evaluated_window(tmp_path, fake_session, ce_clien
 def test_eval_days_max_fits_lookback():
     args = cli.parse_args(["--profile", "p", "--eval-days", str(cli.MAX_EVAL_DAYS)])
     windows = compute_windows(TODAY, Settings(eval_days=args.eval_days))
-    assert len(windows.eval_days) == cli.MAX_EVAL_DAYS == 58
+    settled = [d for d in windows.eval_days if d not in windows.provisional_days]
+    assert len(settled) == cli.MAX_EVAL_DAYS == 58
 
 
 @pytest.mark.parametrize("value", ["0", "59"])
@@ -128,3 +129,29 @@ def test_eval_days_out_of_range_rejected(value, capsys):
         cli.parse_args(["--profile", "p", "--eval-days", value])
     assert exc.value.code == 2
     assert "--eval-days must be between 1 and 58" in capsys.readouterr().err
+
+
+def response_with_spike_yesterday():
+    days = date_range(WINDOWS.fetch_start, WINDOWS.fetch_end)
+    ec2 = {d: [98.0, 100.0, 102.0][i % 3] for i, d in enumerate(days)}
+    ec2[date(2026, 10, 12)] = 150.0
+    ec2[date(2026, 10, 14)] = 400.0  # T−1: not settled in Cost Explorer yet
+    return {"ResultsByTime": results_from_matrix({"Amazon EC2": ec2}), "DimensionValueAttributes": []}
+
+
+def run_rows(tmp_path, ce_client, *extra):
+    out = tmp_path / "anomalies.csv"
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", response_with_spike_yesterday())
+        code = cli.main(["--profile", "p", "--output", str(out), "--end-date", "2026-10-15", "--no-report", *extra])
+    assert code == 0
+    with open(out, newline="") as f:
+        return [(r["date"], r["kind"], r["provisional"]) for r in csv.DictReader(f)]
+
+
+def test_spike_yesterday_is_reported_as_provisional(tmp_path, fake_session, ce_client):
+    assert run_rows(tmp_path, ce_client) == [("2026-10-14", "SPIKE", "true"), ("2026-10-12", "SPIKE", "false")]
+
+
+def test_no_provisional_restores_settled_window(tmp_path, fake_session, ce_client):
+    assert run_rows(tmp_path, ce_client, "--no-provisional") == [("2026-10-12", "SPIKE", "false")]
