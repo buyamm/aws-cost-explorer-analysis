@@ -361,6 +361,37 @@ def section_near_misses(report: Report) -> str:
     )
 
 
+def section_cad(report: Report) -> str:
+    if report.cad_error:
+        return (
+            "<h2>Đối chiếu AWS CAD</h2>"
+            f'<div class="card"><p>Lần chạy này không lấy được anomaly của AWS Cost Anomaly Detection: {escape(report.cad_error)}</p></div>'
+        )
+    if report.cad is None:
+        return ""
+    rows = "".join(
+        "<tr>"
+        f'<td class="date">{c.start.isoformat()} → {c.end.isoformat() if c.end else "đang diễn ra"}</td>'
+        f'<td class="svc">{escape(", ".join(sorted(c.services)))}</td>'
+        f'<td class="num">{escape(usd(c.total_impact))}</td><td class="num">{c.max_score:.2f}</td>'
+        "</tr>"
+        for c in report.cad_only
+    )
+    table = (
+        '<div class="card table-wrap"><table><thead><tr><th>Thời gian</th><th>Service</th><th>Tổng tác động</th>'
+        f"<th>Điểm</th></tr></thead><tbody>{rows}</tbody></table></div>"
+        if rows
+        else ""
+    )
+    return (
+        "<h2>Đối chiếu AWS CAD</h2>"
+        f"<p>Cả hai cùng phát hiện: {report.cad_both} dòng · chỉ tool: {report.cad_tool_only} dòng · "
+        f"chỉ AWS CAD: {len(report.cad_only)} anomaly. CAD dùng mô hình ML của AWS (hộp đen); tool không xem được cách CAD tính, "
+        "nên các anomaly chỉ CAD thấy là gợi ý để xem thêm.</p>"
+        f"{table}"
+    )
+
+
 def section_config(report: Report) -> str:
     params = "".join(
         f"<tr><td><code>{escape(p.name)}</code></td><td>{f'<code>{escape(p.flag)}</code>' if p.flag else '—'}</td>"
@@ -424,6 +455,7 @@ def render_html(report: Report) -> str:
 {section_bars(report)}
 {section_table(report)}
 {section_near_misses(report)}
+{section_cad(report)}
 {section_config(report)}
 </main>
 <script id="report-data" type="application/json">{chart_data(report)}</script>

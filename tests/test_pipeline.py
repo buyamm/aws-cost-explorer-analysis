@@ -58,3 +58,52 @@ def test_run_guards_the_cost_explorer_client(ce_client):
         ce_client.get_cost_forecast(
             TimePeriod={"Start": "2026-10-01", "End": "2026-10-31"}, Metric="UNBLENDED_COST", Granularity="MONTHLY"
         )
+
+
+def cad_response():
+    return {
+        "Anomalies": [
+            {
+                "AnomalyId": "a-fargate",
+                "AnomalyStartDate": "2026-10-10",
+                "AnomalyEndDate": "2026-10-12",
+                "RootCauses": [{"Service": "AWS Fargate"}],
+                "AnomalyScore": {"MaxScore": 0.9, "CurrentScore": 0.5},
+                "Impact": {"MaxImpact": 28.0, "TotalImpact": 84.0},
+                "MonitorArn": "arn:aws:ce::111122223333:anomalymonitor/services",
+            }
+        ]
+    }
+
+
+def test_with_cad_marks_matches_after_fetching_costs(ce_client):
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", fargate_sp_expiry())
+        stub.add_response(
+            "get_anomalies",
+            cad_response(),
+            {"DateInterval": {"StartDate": "2026-10-06", "EndDate": "2026-10-14"}, "MaxResults": 100},
+        )
+        result = pipeline.run(FakeSession(ce_client), SETTINGS, TODAY, with_cad=True)
+        stub.assert_no_pending_responses()
+    assert [c.id for c in result.cad] == ["a-fargate"] and result.cad_error is None
+    by_day = {a.date: a.cad_match for a in result.anomalies}
+    assert by_day[date(2026, 10, 10)] is True and by_day[date(2026, 10, 13)] is False
+
+
+def test_without_cad_get_anomalies_is_forbidden(ce_client):
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", fargate_sp_expiry())
+        result = pipeline.run(FakeSession(ce_client), SETTINGS, TODAY)
+    assert result.cad is None and all(a.cad_match is None for a in result.anomalies)
+    with pytest.raises(ForbiddenOperation):
+        ce_client.get_anomalies(DateInterval={"StartDate": "2026-10-06", "EndDate": "2026-10-14"})
+
+
+def test_cad_failure_does_not_fail_the_run(ce_client):
+    with Stubber(ce_client) as stub:
+        stub.add_response("get_cost_and_usage", fargate_sp_expiry())
+        stub.add_client_error("get_anomalies", service_error_code="AccessDeniedException", service_message="no")
+        result = pipeline.run(FakeSession(ce_client), SETTINGS, TODAY, with_cad=True)
+    assert result.cad is None and "AccessDeniedException" in result.cad_error
+    assert result.anomalies and all(a.cad_match is None for a in result.anomalies)

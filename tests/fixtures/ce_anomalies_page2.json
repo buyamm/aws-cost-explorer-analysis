@@ -1,0 +1,12 @@
+{
+  "Anomalies": [
+    {
+      "AnomalyId": "a-cache",
+      "AnomalyStartDate": "2026-10-10T00:00:00Z",
+      "DimensionValue": "Amazon ElastiCache",
+      "AnomalyScore": {"MaxScore": 0.88, "CurrentScore": 0.88},
+      "Impact": {"MaxImpact": 95.0, "TotalImpact": 380.0},
+      "MonitorArn": "arn:aws:ce::111122223333:anomalymonitor/services"
+    }
+  ]
+}

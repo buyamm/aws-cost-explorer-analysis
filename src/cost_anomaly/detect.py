@@ -33,6 +33,7 @@ class Anomaly:
     provisional: bool = False
     known: bool = False  # listed under `known` in the config: reported, not alerted
     month_impact: float = 0.0  # delta × days left in the month: cost if it continues
+    cad_match: bool | None = None  # AWS Cost Anomaly Detection also flagged it; None = not checked
 
 
 @dataclass(frozen=True)

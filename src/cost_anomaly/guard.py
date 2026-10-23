@@ -1,4 +1,6 @@
 ALLOWED_OPERATIONS = frozenset({"GetCostAndUsage"})
+# --with-cad: also read AWS Cost Anomaly Detection's findings
+CAD_OPERATIONS = ALLOWED_OPERATIONS | {"GetAnomalies"}
 
 
 class ForbiddenOperation(RuntimeError):

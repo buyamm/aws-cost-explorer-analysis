@@ -15,6 +15,7 @@ from .state import NEW, Change
 
 WEBHOOK_ENV = "COST_ANOMALY_SLACK_WEBHOOK"
 SLACK_HOST = "hooks.slack.com"
+CAD_LABEL = "AWS CAD cũng phát hiện"
 MAX_LISTED = 10
 TIMEOUT = 10  # seconds
 ATTEMPTS = 3
@@ -48,7 +49,7 @@ def describe(change: Change) -> str:
     days = i.start.isoformat() if i.start == i.end else f"{i.start.isoformat()} → {i.end.isoformat()}"
     move = f"vượt {usd(i.peak_delta)}" if i.peak_delta >= 0 else f"giảm {usd(-i.peak_delta)}"
     sign = "+" if i.month_impact >= 0 else ""
-    labels = [RATE_LABEL] * (i.driver == RATE) + [PROVISIONAL_LABEL] * i.provisional
+    labels = [RATE_LABEL] * (i.driver == RATE) + [PROVISIONAL_LABEL] * i.provisional + [CAD_LABEL] * i.cad_match
     tags = f" · _{', '.join(labels)}_" if labels else ""
     return (
         f"*{i.kind} · {escape(i.service)}* ({'mới' if change.reason == NEW else 'xấu đi'})\n"

@@ -170,6 +170,7 @@ Thư mục trong `--output` phải tồn tại trước khi chạy.
 | `--eval-days` | `7` | Số ngày **đã chốt** được đánh giá, từ 1 đến 58 (để mọi ngày đánh giá đều có đủ 30 ngày baseline trong 90 ngày dữ liệu) |
 | `--max-pages` | `20` | Số request Cost Explorer tối đa (mỗi request $0.01) |
 | `--config` | | File TOML: ngưỡng mặc định, ngưỡng riêng từng service, danh sách `ignore`/`known`. Xem [File config](#file-config) |
+| `--with-cad` | | Lấy thêm anomaly của AWS Cost Anomaly Detection để đối chiếu. Xem [Đối chiếu với AWS CAD](#đối-chiếu-với-aws-cad) |
 | `--state` | | File JSON lưu các sự cố đã báo. Xem [Sự cố và cảnh báo Slack](#sự-cố-và-cảnh-báo-slack) |
 | `--fail-on-anomaly` | | Trả mã 1 khi có điều mới cần xem (dùng cho CI/cron) |
 | `--alert-dry-run` | | In nội dung tin nhắn Slack thay vì gửi; không ghi `--state` |
@@ -238,6 +239,17 @@ Mỗi lần chạy có sự cố mới/xấu đi sẽ gửi đúng một tin nh�
 Không đặt webhook thì danh sách sự cố mới được in ra màn hình. Kết hợp `--fail-on-anomaly` để CI hoặc cron báo lỗi khi có điều mới.
 
 Lưu ý: chạy tay vẫn cần nhập MFA. Để chạy tự động hằng ngày không cần người, xem phần triển khai Lambda (spec 005).
+
+## Đối chiếu với AWS CAD
+
+AWS Cost Anomaly Detection (CAD) miễn phí và dùng mô hình ML, nhưng là hộp đen. `--with-cad` lấy anomaly của CAD trong cùng khung đánh giá và đặt cạnh kết quả của tool:
+
+- Cột CSV `cad_match`: `true` nếu CAD có anomaly chứa đúng service và ngày đó (theo root cause), `false` nếu chỉ tool thấy, để trống nếu không đối chiếu.
+- Report có mục **Đối chiếu AWS CAD**: số dòng cả hai cùng thấy, chỉ tool thấy, và bảng các anomaly chỉ CAD thấy.
+- Tin nhắn Slack ghi "AWS CAD cũng phát hiện" khi có.
+- Cần bật CAD trong account (có monitor) và role phải có quyền `ce:GetAnomalies`. Nếu không lấy được, tool in cảnh báo rồi chạy tiếp như bình thường.
+
+Lưu ý chi phí: tài liệu AWS không nói rõ `GetAnomalies` có bị tính $0.01/request như `GetCostAndUsage` hay không (thường chỉ 1 request mỗi lần chạy). Cách kiểm tra: chạy thử một lần rồi xem dòng Cost Explorer API trong Bills hôm sau. Vì vậy tính năng này mặc định tắt.
 
 ## Cách phát hiện
 
@@ -308,8 +320,8 @@ Các dòng được sắp theo ngày mới nhất trước, trong cùng ngày th
 
 Role có thể có quyền rộng, nhưng tool chỉ dùng đúng phần cần thiết:
 
-- Khi gọi `sts:AssumeRole`, tool gửi kèm một **session policy** chỉ cho phép `ce:GetCostAndUsage`. Quyền thực tế là phần giao giữa quyền của role và session policy. Vì vậy credential tạm chỉ đọc được Cost Explorer, kể cả khi bị lộ.
-- Trong code, mỗi client có một allowlist API: client STS chỉ gọi được `AssumeRole`, client Cost Explorer chỉ gọi được `GetCostAndUsage`.
+- Khi gọi `sts:AssumeRole`, tool gửi kèm một **session policy** chỉ cho phép `ce:GetCostAndUsage` (thêm `ce:GetAnomalies` khi có `--with-cad`). Quyền thực tế là phần giao giữa quyền của role và session policy. Vì vậy credential tạm chỉ đọc được Cost Explorer, kể cả khi bị lộ.
+- Trong code, mỗi client có một allowlist API: client STS chỉ gọi được `AssumeRole`, client Cost Explorer chỉ gọi được `GetCostAndUsage` (và `GetAnomalies` khi có `--with-cad`). Session policy và allowlist được tạo từ cùng một danh sách nên không thể lệch nhau.
 - Mỗi lần chạy thường tốn 1–2 request Cost Explorer ($0.01/request). `--max-pages` chặn trường hợp phân trang bất thường.
 
 CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ cho người có quyền xem chi phí, và không commit lên repo. `.gitignore` đã loại `*.csv`, `*_report.html` và `*_report.md`.
@@ -328,7 +340,7 @@ CSV và report chứa dữ liệu chi phí thật của account. Chỉ chia sẻ
 
 ## Demo offline
 
-Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính), RDS tăng $7 (chỉ bị báo nhờ ngưỡng riêng trong `demo/cost-anomaly.toml`), AWS Backup ngừng chạy (DROP), Bedrock được đánh dấu `known`. Demo chạy hai lần với cùng file state: lần một (hôm qua) ghi nhận sự cố; lần hai (hôm nay, `--alert-dry-run`) chỉ đưa sự cố mới vào tin nhắn Slack. Demo không gọi AWS và không tốn phí.
+Cần mã nguồn (repo). Demo chạy CLI thật trên AWS giả lập: file config tạm, MFA giả, STS và Cost Explorer được stub bằng `botocore.stub.Stubber`. Dữ liệu là số liệu tổng hợp có cài sẵn các kịch bản: EC2 tăng đột biến, NAT/data transfer tăng 2 ngày, Bedrock mới xuất hiện, Lambda tăng nhỏ bị lọc, Savings Plans của Fargate hết hạn, RI của ElastiCache hết hạn, CloudWatch tăng vọt hôm qua (tạm tính), RDS tăng $7 (chỉ bị báo nhờ ngưỡng riêng trong `demo/cost-anomaly.toml`), AWS Backup ngừng chạy (DROP), Bedrock được đánh dấu `known`. Lần chạy thứ hai dùng `--with-cad` với dữ liệu CAD giả lập (EC2 và ElastiCache trùng với tool, S3 chỉ CAD thấy). Demo chạy hai lần với cùng file state: lần một (hôm qua) ghi nhận sự cố; lần hai (hôm nay, `--alert-dry-run`) chỉ đưa sự cố mới vào tin nhắn Slack. Demo không gọi AWS và không tốn phí.
 
 ```sh
 uv sync

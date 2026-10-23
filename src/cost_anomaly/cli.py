@@ -14,6 +14,7 @@ from .analysis import build_report, usd
 from .auth import AuthError, assume_role_session
 from .config import Settings
 from .fetch import CostExplorerError, TooManyPages
+from .guard import ALLOWED_OPERATIONS, CAD_OPERATIONS
 from .html_report import write_html
 from .md_report import write_markdown
 from .pipeline import run
@@ -60,6 +61,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--no-provisional",
         action="store_true",
         help="skip the 2 most recent days instead of evaluating them as provisional (not settled in Cost Explorer)",
+    )
+    p.add_argument(
+        "--with-cad",
+        action="store_true",
+        help="also read AWS Cost Anomaly Detection's anomalies (adds ce:GetAnomalies to the session policy)",
     )
     p.add_argument("--no-drop", action="store_true", help="do not report services that fall to near zero (DROP)")
     p.add_argument(
@@ -130,12 +136,15 @@ def main(argv: list[str] | None = None) -> int:
     today = args.end_date or datetime.now(timezone.utc).date()
 
     try:
-        session = assume_role_session(args.profile)
-        result = run(session, settings, today)
+        operations = CAD_OPERATIONS if args.with_cad else ALLOWED_OPERATIONS
+        session = assume_role_session(args.profile, operations=operations)
+        result = run(session, settings, today, with_cad=args.with_cad)
     except (AuthError, BotoCoreError, CostExplorerError, TooManyPages) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
+    if result.cad_error:
+        print(f"warning: AWS CAD unavailable, continuing without it: {result.cad_error}", file=sys.stderr)
     anomalies = result.anomalies
     write_csv(anomalies, args.output)
     print(f"Found {len(anomalies)} anomalies → {args.output}")
@@ -144,7 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     location = args.output
     if not args.no_report:
         html_path, md_path = report_paths(args.output)
-        report = build_report(result.usage, result.windows, settings, anomalies, args.profile, now, result.amortized)
+        report = build_report(
+            result.usage, result.windows, settings, anomalies, args.profile, now, result.amortized,
+            result.cad, result.cad_error,
+        )
         write_html(report, html_path)
         write_markdown(report, md_path)
         print(f"Report → {html_path}, {md_path}")

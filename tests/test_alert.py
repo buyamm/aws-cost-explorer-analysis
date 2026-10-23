@@ -120,3 +120,8 @@ def test_client_errors_are_not_retried():
     with pytest.raises(AlertError, match="400"):
         send(URL, {"text": "hi"}, opener=opener, sleep=lambda s: None)
     assert len(opener.requests) == 1
+
+
+def test_cad_confirmation_is_noted():
+    payload = build_message([Change(incident(cad_match=True), NEW)], "p", None)
+    assert "AWS CAD cũng phát hiện" in text_of(payload)

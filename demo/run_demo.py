@@ -18,12 +18,14 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import boto3
-from botocore.stub import ANY, Stubber
+from botocore.stub import Stubber
 
 from cost_anomaly import auth, cli
+from cost_anomaly.cad import build_request as cad_request
 from cost_anomaly.config import Settings
 from cost_anomaly.dates import compute_windows, date_range
 from cost_anomaly.fetch import build_request
+from cost_anomaly.guard import ALLOWED_OPERATIONS, CAD_OPERATIONS
 
 PROFILE = "project-cost"
 ROLE_ARN = "arn:aws:iam::111122223333:role/CostReader"
@@ -123,6 +125,34 @@ def to_results(usage: Matrix, paid: Matrix, days: list[date]) -> list[dict]:
     ]
 
 
+def simulate_cad(windows) -> dict:
+    """What AWS Cost Anomaly Detection would return: two findings the tool also has, one it doesn't."""
+    e = [d for d in windows.eval_days if d not in windows.provisional_days]
+    monitor = "arn:aws:ce::111122223333:anomalymonitor/aws-services"
+
+    def finding(id_, service, start, end, impact, score):
+        a = {
+            "AnomalyId": id_,
+            "AnomalyStartDate": start.isoformat(),
+            "DimensionValue": service,
+            "RootCauses": [{"Service": service, "Region": "us-east-1"}],
+            "AnomalyScore": {"MaxScore": score, "CurrentScore": score},
+            "Impact": {"MaxImpact": impact, "TotalImpact": impact},
+            "MonitorArn": monitor,
+        }
+        if end:
+            a["AnomalyEndDate"] = end.isoformat()
+        return a
+
+    return {
+        "Anomalies": [
+            finding("cad-ec2", "Amazon Elastic Compute Cloud - Compute", e[5], e[5], 225.0, 0.91),
+            finding("cad-cache", "Amazon ElastiCache", e[4], None, 380.0, 0.84),  # still open
+            finding("cad-s3", "Amazon Simple Storage Service", e[1], e[3], 9.8, 0.55),  # tool sees a trend, not a spike
+        ]
+    }
+
+
 # --------------------------------------------------------------------------- fake AWS
 
 
@@ -141,8 +171,11 @@ class FakeSession:
         return self._client
 
 
-def install_fake_aws(results: list[dict], start: date, end: date) -> list[Stubber]:
+def install_fake_aws(
+    results: list[dict], start: date, end: date, operations=ALLOWED_OPERATIONS, cad: dict | None = None
+) -> list[Stubber]:
     """Patch cli.assume_role_session so the real auth code runs against stubbed STS/CE."""
+    policy = auth.session_policy(operations)
     sts = boto3.client("sts", region_name="us-east-1", **DUMMY_KEYS)
     ce = boto3.client("ce", region_name="us-east-1", **DUMMY_KEYS)
     sts_stub, ce_stub = Stubber(sts), Stubber(ce)
@@ -165,7 +198,7 @@ def install_fake_aws(results: list[dict], start: date, end: date) -> list[Stubbe
         {
             "RoleArn": ROLE_ARN,
             "RoleSessionName": auth.SESSION_NAME,
-            "Policy": json.dumps(auth.SESSION_POLICY),
+            "Policy": json.dumps(policy),
             "DurationSeconds": auth.DEFAULT_DURATION,
             "SerialNumber": MFA_SERIAL,
             "TokenCode": FAKE_MFA,
@@ -185,11 +218,14 @@ def install_fake_aws(results: list[dict], start: date, end: date) -> list[Stubbe
         {"ResultsByTime": results[half:], "DimensionValueAttributes": []},
         {**first, "NextPageToken": "page-2"},
     )
+    if cad is not None:
+        w = compute_windows(end, Settings())
+        ce_stub.add_response("get_anomalies", cad, cad_request(w.eval_days[0], w.eval_days[-1]))
 
     def session_factory(**kwargs):
         if "profile_name" in kwargs:
             step(f"Source profile '{kwargs['profile_name']}' → sts:AssumeRole {ROLE_ARN}")
-            step(f"Session policy: {json.dumps(auth.SESSION_POLICY['Statement'][0])}")
+            step(f"Session policy: {json.dumps(policy['Statement'][0])}")
             return FakeSession(sts)
         step(f"Got temporary credentials {kwargs['aws_access_key_id']} (Cost Explorer read-only)")
         return FakeSession(ce)
@@ -198,10 +234,13 @@ def install_fake_aws(results: list[dict], start: date, end: date) -> list[Stubbe
         print(f"    {msg}{FAKE_MFA}  (simulated)")
         return FAKE_MFA
 
-    def fake_assume_role_session(profile):
-        return auth.assume_role_session(profile, prompt=fake_prompt, session_factory=session_factory)
+    def fake_assume_role_session(profile, operations=ALLOWED_OPERATIONS):
+        return auth.assume_role_session(profile, prompt=fake_prompt, session_factory=session_factory, operations=operations)
 
     cli.assume_role_session = fake_assume_role_session
+    ce.meta.events.register(
+        "provide-client-params.ce.GetAnomalies", lambda params, **_: step("ce:GetAnomalies (AWS CAD, --with-cad)")
+    )
     ce.meta.events.register(
         "provide-client-params.ce.GetCostAndUsage",
         lambda params, **_: step(
@@ -264,7 +303,8 @@ SCENARIOS = """\
   • Bedrock is listed as known               → its rows have known=true
   (config: demo/cost-anomaly.toml)
   Two runs share a --state file: yesterday records the incidents, today only the new/worse
-  ones (the CloudWatch spike of T−1) appear in the Slack payload."""
+  ones (the CloudWatch spike of T−1) appear in the Slack payload.
+  Run 2 also uses --with-cad: EC2 Compute and ElastiCache match AWS CAD, S3 is CAD-only."""
 
 
 def main() -> int:
@@ -309,8 +349,9 @@ def main() -> int:
     if code != 0:
         return code
 
-    header(f"Run 2 — today ({args.end_date}): only new or worse incidents reach Slack (dry run)")
-    code = run_cli(matrix, paid, args.end_date, ["--output", str(args.output), "--config", config, "--state", state, "--alert-dry-run"])
+    header(f"Run 2 — today ({args.end_date}): only new or worse incidents reach Slack (dry run), cross-checked with AWS CAD")
+    extra = ["--output", str(args.output), "--config", config, "--state", state, "--alert-dry-run", "--with-cad"]
+    code = run_cli(matrix, paid, args.end_date, extra, cad=simulate_cad(windows))
     if code != 0:
         return code
 
@@ -319,10 +360,12 @@ def main() -> int:
     return 0
 
 
-def run_cli(usage: Matrix, paid: Matrix, end: date, extra: list[str]) -> int:
+def run_cli(usage: Matrix, paid: Matrix, end: date, extra: list[str], cad: dict | None = None) -> int:
     """Run the real CLI for one end date against freshly stubbed AWS."""
     w = compute_windows(end, Settings())
-    stubs = install_fake_aws(to_results(usage, paid, date_range(w.fetch_start, w.fetch_end)), w.fetch_start, w.fetch_end)
+    results = to_results(usage, paid, date_range(w.fetch_start, w.fetch_end))
+    operations = CAD_OPERATIONS if cad is not None else ALLOWED_OPERATIONS
+    stubs = install_fake_aws(results, w.fetch_start, w.fetch_end, operations, cad)
     argv = ["--profile", PROFILE, "--end-date", end.isoformat(), *extra]
     print(f"  $ cost-anomaly {' '.join(argv)}")
     code = cli.main(argv)

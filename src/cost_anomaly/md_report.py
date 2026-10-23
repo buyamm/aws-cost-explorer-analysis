@@ -73,6 +73,30 @@ def render_markdown(report: Report) -> str:
             ],
         )
 
+    if report.cad_error:
+        out += ["## Đối chiếu AWS CAD", "", f"Lần chạy này không lấy được anomaly của AWS CAD: {report.cad_error}", ""]
+    elif report.cad is not None:
+        out += [
+            "## Đối chiếu AWS CAD",
+            "",
+            f"Cả hai cùng phát hiện: {report.cad_both} dòng · chỉ tool: {report.cad_tool_only} dòng · "
+            f"chỉ AWS CAD: {len(report.cad_only)} anomaly.",
+            "",
+        ]
+        if report.cad_only:
+            out += table(
+                ["Thời gian", "Service", "Tổng tác động", "Điểm"],
+                [
+                    [
+                        f"{c.start.isoformat()} → {c.end.isoformat() if c.end else 'đang diễn ra'}",
+                        ", ".join(sorted(c.services)),
+                        usd(c.total_impact),
+                        f"{c.max_score:.2f}",
+                    ]
+                    for c in report.cad_only
+                ],
+            )
+
     out += ["## Cấu hình thuật toán", ""]
     out += table(
         ["Tham số", "Cờ CLI", "Giá trị", "Ý nghĩa"],

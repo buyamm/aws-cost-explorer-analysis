@@ -1,8 +1,9 @@
 """Turn detection results into a human-readable summary (shared by the HTML and Markdown reports)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+from .cad import CadAnomaly, cad_only
 from .config import Settings
 from .dates import Windows, date_range, runs_of
 from .detect import AMORTIZED, DROP, MAD_TO_SIGMA, NEW_SERVICE, RATE, SPIKE, Anomaly, Score, score_pair
@@ -83,6 +84,17 @@ class Report:
     insights: list[str]
     next_steps: list[str]
     params: list[Param]
+    cad: list[CadAnomaly] | None = None  # None: --with-cad not used or CAD unavailable
+    cad_only: list[CadAnomaly] = field(default_factory=list)
+    cad_error: str | None = None
+
+    @property
+    def cad_both(self) -> int:
+        return sum(1 for r in self.rows if r.anomaly.cad_match is True)
+
+    @property
+    def cad_tool_only(self) -> int:
+        return sum(1 for r in self.rows if r.anomaly.cad_match is False)
 
     @property
     def spike_count(self) -> int:
@@ -115,6 +127,7 @@ COLUMNS = [
     ("driver", "usage: mức sử dụng tăng, hai số đo cùng tăng xấp xỉ bằng nhau. rate: tăng do giá hoặc coverage Savings Plans/RI thay đổi (ví dụ cam kết hết hạn), không phải do dùng nhiều hơn."),
     ("month_impact", "delta × số ngày từ ngày đó tới hết tháng (tính cả hai đầu): chi phí thêm nếu mức bất thường tiếp diễn. Âm với DROP."),
     ("known", "true nếu service nằm trong danh sách known của file config: vẫn báo nhưng đã được giải thích."),
+    ("cad_match", "Chỉ có khi chạy với --with-cad. true: AWS Cost Anomaly Detection cũng có anomaly chứa service và ngày này; false: chỉ tool phát hiện; trống: không đối chiếu được."),
     ("provisional", "true: ngày thuộc 2 ngày gần nhất, Cost Explorer chưa chốt số liệu nên con số có thể còn thay đổi (tạm tính)."),
 ]
 
@@ -374,6 +387,8 @@ def build_report(
     profile: str,
     generated_at: datetime,
     amortized: CostMatrix | None = None,
+    cad: list[CadAnomaly] | None = None,
+    cad_error: str | None = None,
 ) -> Report:
     amortized = matrix if amortized is None else amortized
     services = sorted((matrix.keys() | amortized.keys()) - settings.ignore)
@@ -482,4 +497,7 @@ def build_report(
         insights=insights,
         next_steps=next_steps,
         params=build_params(settings),
+        cad=cad,
+        cad_only=cad_only(anomalies, cad, windows.eval_days[-1]) if cad is not None else [],
+        cad_error=cad_error,
     )
